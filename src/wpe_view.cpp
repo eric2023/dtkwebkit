@@ -13,14 +13,52 @@
 #include "wpe_view.h"
 #include "wpe_event_translator.h"
 
+#include <wayland-server-core.h>
 #include <QOpenGLContext>
-
 #include <QDebug>
+#include <QOpenGLShader>
+#include <QOpenGLShaderProgram>
+#include <QInputMethodQueryEvent>
 #include <jsc/jsc.h>
-
+// WebKitHitTestResult.h is included transitively via <wpe/webkit.h>.
 #include <glib.h>
 
 DTKWPE_BEGIN_NAMESPACE
+
+// GLES2 vertex shader: full-screen quad from a 4-vertex triangle strip.
+// position is clip-space [-1,1]; texCoord samples the EGL image texture.
+static const char *s_vertSrc = R"GLSL(
+attribute vec2 a_pos;
+attribute vec2 a_tex;
+varying vec2 v_tex;
+void main() {
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+    v_tex = a_tex;
+}
+)GLSL";
+
+// GLES2 fragment shader: sample the WPE EGL image or SHM texture.
+// u_yFlip: 1.0 for EGL images (GL origin at bottom-left, needs flip),
+//          0.0 for SHM buffers (screen origin at top-left, no flip).
+static const char *s_fragSrc = R"GLSL(
+precision mediump float;
+varying vec2 v_tex;
+uniform sampler2D u_tex;
+uniform float u_yFlip;
+void main() {
+    gl_FragColor = texture2D(u_tex, vec2(v_tex.x, u_yFlip > 0.5 ? 1.0 - v_tex.y : v_tex.y));
+}
+)GLSL";
+
+// Full-screen quad as a triangle strip: (pos.x, pos.y, tex.s, tex.t)
+//  4 vertices, 4 floats each → interleaved VBO.
+static const float s_quadVerts[] = {
+    // pos        tex
+    -1.0f,  1.0f,  0.0f, 0.0f,   // top-left
+     1.0f,  1.0f,  1.0f, 0.0f,   // top-right
+    -1.0f, -1.0f,  0.0f, 1.0f,   // bottom-left
+     1.0f, -1.0f,  1.0f, 1.0f,   // bottom-right
+};
 
 // WPEBackend-FDO EGL exportable client callbacks.
 // Free functions because the C client struct callbacks are referenced
@@ -59,14 +97,34 @@ DWPEView::DWPEView()
 
 DWPEView::~DWPEView()
 {
+    // Stop the GLib poll timer first to prevent it from dispatching
+    // into a half-destroyed backend.
+    m_glibPollTimer.stop();
+
     m_bridge.reset();
     m_schemeHandler.reset();
     releaseCurrentImage();
+    // Reset IME context before the WebView is destroyed — WebKit holds a
+    // reference to it, so we must drop our back-pointer before unref'ing
+    // the view to avoid use-after-free in virtual function callbacks.
+    m_imContext.reset();
 
-    if (m_webView)
+    // Unref the web view first. WebKit's teardown will release the
+    // wpe_view_backend, triggering our destroy-notify callback (set
+    // in initializeWPE) which frees m_exportable. This ordering avoids
+    // the double-free crash that occurred when destroying both
+    // independently.
+    if (m_webView) {
         g_object_unref(m_webView);
-    if (m_exportable)
+        m_webView = nullptr;
+    }
+
+    // If the notify callback didn't fire (e.g. web view was never
+    // fully created), clean up the exportable as a fallback.
+    if (m_exportable) {
         wpe_view_backend_exportable_fdo_destroy(m_exportable);
+        m_exportable = nullptr;
+    }
 }
 
 void DWPEView::initializeWPE(EGLDisplay eglDisplay)
@@ -95,7 +153,30 @@ void DWPEView::initializeWPE(EGLDisplay eglDisplay)
 
     // Get the WPE view backend and create WebKitWebView
     struct wpe_view_backend *backend = wpe_view_backend_exportable_fdo_get_view_backend(m_exportable);
-    auto *webViewBackend = webkit_web_view_backend_new(backend, nullptr, nullptr);
+
+    // Fix #1: connect backend to EventTranslator so input/activity events dispatch.
+    m_eventTranslator->setViewBackend(backend);
+
+    // Initialize the xkb keymap so WPE can convert evdev keycodes to
+    // the correct Unicode characters for the user's keyboard layout.
+    m_eventTranslator->initializeXkbKeymap();
+
+    // Fix #6: explicitly initialize the backend before creating the web view.
+    wpe_view_backend_initialize(backend);
+
+    // Pass a destroy notify so WebKit calls us when it releases the
+    // wpe_view_backend. This avoids a double-free: if we destroy the
+    // exportable ourselves AND WebKit also destroys the backend, the
+    // second destroy crashes. By letting WebKit drive the teardown via
+    // the notify callback, we get a single, ordered destruction.
+    auto *webViewBackend = webkit_web_view_backend_new(backend,
+        [](gpointer data) {
+            auto *view = static_cast<DWPEView *>(data);
+            if (view->m_exportable) {
+                wpe_view_backend_exportable_fdo_destroy(view->m_exportable);
+                view->m_exportable = nullptr;
+            }
+        }, this);
     m_webView = webkit_web_view_new(webViewBackend);
     // webkit_web_view_new takes ownership of webViewBackend; do not unref.
 
@@ -104,14 +185,73 @@ void DWPEView::initializeWPE(EGLDisplay eglDisplay)
     m_schemeHandler = std::make_unique<DWPESchemeHandler>();
     m_schemeHandler->registerScheme(m_context);
 
+    // Create and attach the IME (input method) context to the WebView.
+    // This enables preedit (composition) and commit text forwarding from
+    // Qt's input method system to WebKit's editable elements.
+    m_imContext = std::make_unique<DWPEInputMethodContext>();
+    webkit_web_view_set_input_method_context(m_webView, m_imContext->context());
     // Initialize the JS bridge
     m_bridge = std::make_unique<DWPEBridge>(m_webView);
+
+
     m_bridge->initialize();
+
+    // Connect WebKitWebView signal handlers for load events and process crashes.
+    g_signal_connect(m_webView, "load-changed", G_CALLBACK(onLoadChanged), this);
+    g_signal_connect(m_webView, "web-process-terminated", G_CALLBACK(onWebProcessTerminated), this);
+    g_signal_connect(m_webView, "user-message-received", G_CALLBACK(onUserMessageReceived), this);
+    g_signal_connect(m_webView, "mouse-target-changed", G_CALLBACK(onMouseTargetChanged), this);
+    g_signal_connect(m_webView, "decide-policy", G_CALLBACK(onDecidePolicy), this);
+    g_signal_connect(m_webView, "create", G_CALLBACK(onCreate), this);
+    g_signal_connect(m_webView, "ready-to-show", G_CALLBACK(onReadyToShow), this);
+    g_signal_connect(m_webView, "close", G_CALLBACK(onClose), this);
+    // Mark the view as visible, in-window, and focused so WPE starts
+    // producing frames and accepting input. focusInEvent may not fire
+    // when QOpenGLWindow is embedded in a QWidget container.
+    wpe_view_backend_add_activity_state(backend,
+        wpe_view_activity_state_visible | wpe_view_activity_state_in_window |
+        wpe_view_activity_state_focused);
+
+    // Dispatch the initial view size to WPE so it knows the drawing surface
+    // dimensions and can start producing frames immediately.
+    float dpr = static_cast<float>(devicePixelRatioF());
+    uint32_t pw = static_cast<uint32_t>(width() * dpr);
+    uint32_t ph = static_cast<uint32_t>(height() * dpr);
+    wpe_view_backend_dispatch_set_size(backend, pw, ph);
+    wpe_view_backend_dispatch_set_device_scale_factor(backend, dpr);
+
+    // GLib context bridge: WPEBackend-FDO internally uses a wl_display with
+    // GSources attached to g_main_context_default(). Qt's event loop never
+    // dispatches that context, so WPE's Wayland events (including frame
+    // export) never fire. Pump the GLib default context at 16ms intervals
+    // (~60 FPS) so WPE frame delivery stays alive.
+    QObject::connect(&m_glibPollTimer, &QTimer::timeout, []() {
+        g_main_context_iteration(g_main_context_default(), FALSE);
+    });
+    m_glibPollTimer.start(16);
+
+    m_wpeReady = true;
 }
 
 void DWPEView::initializeGL()
 {
     initializeOpenGLFunctions();
+
+    // Fix #4/#5: get the EGLDisplay from Qt's own GL context (not a separate
+    // eglGetDisplay call) so WPE EGL images share the same display as the one
+    // Qt uses for rendering. This is called from the GL thread, so the context
+    // is guaranteed current.
+    EGLDisplay eglDisplay = eglGetCurrentDisplay();
+    if (eglDisplay == EGL_NO_DISPLAY) {
+        // Fallback: try the default display (should not normally happen).
+        eglDisplay = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    }
+
+    // Initialize WPE only once (initializeGL can be called again after
+    // surface recreation, but we want the backend created only once).
+    if (!m_wpeReady) {
+        initializeWPE(eglDisplay);
+    }
 
     m_glEGLImageTargetTexture2DOES =
         reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(eglGetProcAddress("glEGLImageTargetTexture2DOES"));
@@ -120,45 +260,146 @@ void DWPEView::initializeGL()
         qWarning() << "DWPEView: glEGLImageTargetTexture2DOES not available";
 
     glGenTextures(1, &m_texture);
+
+    // Fix #3: build the GLES2 shader pipeline that replaces the removed
+    // fixed-function glBegin/glEnd calls (not available in GLES 2.0+).
+    initShader();
+
+    // Notify the application that WPE + GL are both ready for content loading.
+    Q_EMIT wpeReady();
 }
 
 void DWPEView::resizeGL(int w, int h)
 {
     releaseCurrentImage();
     m_eventTranslator->setViewSize(w, h, static_cast<float>(devicePixelRatioF()));
+    // Keep the viewport in sync with the window size (device-pixel units).
+    glViewport(0, 0, static_cast<GLsizei>(w * devicePixelRatioF()),
+               static_cast<GLsizei>(h * devicePixelRatioF()));
 }
 
 void DWPEView::paintGL()
 {
-    std::lock_guard<std::mutex> lock(m_imageMutex);
+    glViewport(
+        0, 0, static_cast<GLsizei>(width() * devicePixelRatioF()), static_cast<GLsizei>(height() * devicePixelRatioF()));
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
 
-    if (!m_currentImage)
+    std::lock_guard<std::mutex> lock(m_imageMutex);
+    if (!m_currentImage && !m_currentShmBuffer) {
+        return;
+    }
+    if (!m_shaderProgram)
         return;
 
-    EGLImageKHR eglImage = wpe_fdo_egl_exported_image_get_egl_image(m_currentImage);
-    if (eglImage && m_glEGLImageTargetTexture2DOES && m_texture) {
-        glBindTexture(GL_TEXTURE_2D, m_texture);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_texture);
+
+    if (m_currentImage) {
+        // EGL image path: import the WPE EGL image via the OES extension.
+        EGLImageKHR eglImage = wpe_fdo_egl_exported_image_get_egl_image(m_currentImage);
+        if (!eglImage || !m_glEGLImageTargetTexture2DOES) {
+            glBindTexture(GL_TEXTURE_2D, 0);
+            return;
+        }
         m_glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, eglImage);
-
-        glViewport(
-            0, 0, static_cast<GLsizei>(width() * devicePixelRatioF()), static_cast<GLsizei>(height() * devicePixelRatioF()));
-        glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-
-        glEnable(GL_TEXTURE_2D);
-        glBegin(GL_QUADS);
-        glTexCoord2f(0.0f, 0.0f);
-        glVertex2f(-1.0f, 1.0f);
-        glTexCoord2f(1.0f, 0.0f);
-        glVertex2f(1.0f, 1.0f);
-        glTexCoord2f(1.0f, 1.0f);
-        glVertex2f(1.0f, -1.0f);
-        glTexCoord2f(0.0f, 1.0f);
-        glVertex2f(-1.0f, -1.0f);
-        glEnd();
-        glDisable(GL_TEXTURE_2D);
+    } else if (m_currentShmBuffer && m_shmData) {
+        // SHM fallback path: upload pixel data from the Wayland SHM buffer.
+        // WPE uses WL_SHM_FORMAT_ARGB8888 (0) or WL_SHM_FORMAT_XRGB8888 (1),
+        // both 32bpp — map to GL_BGRA_EXT (GL_EXT_texture_format_BGRA8888).
+        GLenum internalFormat = GL_RGBA;
+        GLenum pixelFormat = GL_RGBA;
+        if (m_shmFormat == 0 || m_shmFormat == 1) {
+            // ARGB8888 / XRGB8888 → BGRA byte order on little-endian.
+            pixelFormat = GL_BGRA_EXT;
+            internalFormat = GL_BGRA_EXT;
+        }
+        glTexImage2D(GL_TEXTURE_2D, 0, internalFormat,
+                     m_shmWidth, m_shmHeight, 0,
+                     pixelFormat, GL_UNSIGNED_BYTE, m_shmData);
+    } else {
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return;
     }
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    // Draw the full-screen quad using the GLES2 shader pipeline.
+    glUseProgram(m_shaderProgram);
+    glUniform1i(m_texUniform, 0);
+    // EGL images have GL's bottom-left origin (row 0 at t=0 = bottom of
+    // screen), so they need a Y flip. SHM buffers from Wayland have a
+    // top-left origin (row 0 = top of page); glTexImage2D puts row 0 at
+    // t=0, and our quad maps screen-top to t=0, so no flip is needed.
+    glUniform1f(m_yFlipUniform, m_currentImage ? 1.0f : 0.0f);
+
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    const GLsizei stride = 4 * sizeof(float);
+    glEnableVertexAttribArray(m_posAttr);
+    glVertexAttribPointer(m_posAttr, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void *>(0));
+    glEnableVertexAttribArray(m_texCoordAttr);
+    glVertexAttribPointer(m_texCoordAttr, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void *>(2 * sizeof(float)));
+
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    glDisableVertexAttribArray(m_posAttr);
+    glDisableVertexAttribArray(m_texCoordAttr);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glUseProgram(0);
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
+
+void DWPEView::initShader()
+{
+    // Compile and link the GLES2 texture-blit shader program.
+    m_vertexShader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(m_vertexShader, 1, &s_vertSrc, nullptr);
+    glCompileShader(m_vertexShader);
+    GLint compiled = 0;
+    glGetShaderiv(m_vertexShader, GL_COMPILE_STATUS, &compiled);
+    if (!compiled) {
+        char log[512] = {};
+        glGetShaderInfoLog(m_vertexShader, sizeof(log), nullptr, log);
+        qWarning() << "DWPEView: vertex shader compile failed:" << log;
+        return;
+    }
+
+    m_fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(m_fragmentShader, 1, &s_fragSrc, nullptr);
+    glCompileShader(m_fragmentShader);
+    glGetShaderiv(m_fragmentShader, GL_COMPILE_STATUS, &compiled);
+    if (!compiled) {
+        char log[512] = {};
+        glGetShaderInfoLog(m_fragmentShader, sizeof(log), nullptr, log);
+        qWarning() << "DWPEView: fragment shader compile failed:" << log;
+        return;
+    }
+
+    m_shaderProgram = glCreateProgram();
+    glAttachShader(m_shaderProgram, m_vertexShader);
+    glAttachShader(m_shaderProgram, m_fragmentShader);
+    glLinkProgram(m_shaderProgram);
+    GLint linked = 0;
+    glGetProgramiv(m_shaderProgram, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        char log[512] = {};
+        glGetProgramInfoLog(m_shaderProgram, sizeof(log), nullptr, log);
+        qWarning() << "DWPEView: shader link failed:" << log;
+        return;
+    }
+
+    m_posAttr = glGetAttribLocation(m_shaderProgram, "a_pos");
+    m_texCoordAttr = glGetAttribLocation(m_shaderProgram, "a_tex");
+    m_texUniform = glGetUniformLocation(m_shaderProgram, "u_tex");
+    m_yFlipUniform = glGetUniformLocation(m_shaderProgram, "u_yFlip");
+    // Upload the full-screen quad into a VBO.
+    glGenBuffers(1, &m_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(s_quadVerts), s_quadVerts, GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
 
 void DWPEView::loadUrl(const QString &url)
 {
@@ -218,13 +459,40 @@ void DWPEView::handleExportedImage(struct wpe_fdo_egl_exported_image *image)
         }
         m_currentImage = image;
     }
+
+    // Fix #2: notify WPEBackend-FDO that the frame has been "displayed".
+    // Without this call, WPE considers the previous frame still in flight
+    // and never produces the next one — the rendering pipeline freezes.
+    if (m_exportable)
+        wpe_view_backend_exportable_fdo_dispatch_frame_complete(m_exportable);
+
     requestUpdate();
 }
 
 void DWPEView::handleShmBuffer(struct wpe_fdo_shm_exported_buffer *buffer)
 {
+    // Release previous SHM buffer and store the new one atomically.
+    {
+        std::lock_guard<std::mutex> lock(m_imageMutex);
+        releaseCurrentShmBuffer();
+        m_currentShmBuffer = buffer;
+
+        struct wl_shm_buffer *wlBuffer = wpe_fdo_shm_exported_buffer_get_shm_buffer(buffer);
+        if (wlBuffer) {
+            wl_shm_buffer_begin_access(wlBuffer);
+            m_shmData = wl_shm_buffer_get_data(wlBuffer);
+            m_shmStride = wl_shm_buffer_get_stride(wlBuffer);
+            m_shmWidth = wl_shm_buffer_get_width(wlBuffer);
+            m_shmHeight = wl_shm_buffer_get_height(wlBuffer);
+            m_shmFormat = wl_shm_buffer_get_format(wlBuffer);
+            wl_shm_buffer_end_access(wlBuffer);
+        }
+    }
+
     if (m_exportable)
-        wpe_view_backend_exportable_fdo_egl_dispatch_release_shm_exported_buffer(m_exportable, buffer);
+        wpe_view_backend_exportable_fdo_dispatch_frame_complete(m_exportable);
+
+    requestUpdate();
 }
 
 void DWPEView::releaseCurrentImage()
@@ -234,13 +502,45 @@ void DWPEView::releaseCurrentImage()
         wpe_view_backend_exportable_fdo_egl_dispatch_release_exported_image(m_exportable, m_currentImage);
         m_currentImage = nullptr;
     }
+    releaseCurrentShmBuffer();
+}
+
+void DWPEView::releaseCurrentShmBuffer()
+{
+    if (m_currentShmBuffer && m_exportable) {
+        wpe_view_backend_exportable_fdo_egl_dispatch_release_shm_exported_buffer(m_exportable, m_currentShmBuffer);
+        m_currentShmBuffer = nullptr;
+        m_shmData = nullptr;
+        m_shmStride = 0;
+        m_shmWidth = 0;
+        m_shmHeight = 0;
+        m_shmFormat = 0;
+    }
 }
 
 void DWPEView::onLoadChanged(WebKitWebView *webView, WebKitLoadEvent loadEvent, gpointer data)
 {
-    if (loadEvent == WEBKIT_LOAD_FINISHED)
+    auto *view = static_cast<DWPEView *>(data);
+    switch (loadEvent) {
+    case WEBKIT_LOAD_STARTED:
+        Q_EMIT view->loadProgressChanged(0);
+        Q_EMIT view->urlChanged(QString::fromUtf8(webkit_web_view_get_uri(webView)));
+        break;
+    case WEBKIT_LOAD_COMMITTED:
+        Q_EMIT view->urlChanged(QString::fromUtf8(webkit_web_view_get_uri(webView)));
+        Q_EMIT view->titleChanged(QString::fromUtf8(webkit_web_view_get_title(webView)));
+        break;
+    case WEBKIT_LOAD_FINISHED:
+        Q_EMIT view->titleChanged(QString::fromUtf8(webkit_web_view_get_title(webView)));
+        Q_EMIT view->loadProgressChanged(100);
         qDebug() << "DWPEView: load finished";
+        break;
+    case WEBKIT_LOAD_REDIRECTED:
+        Q_EMIT view->urlChanged(QString::fromUtf8(webkit_web_view_get_uri(webView)));
+        break;
+    }
 }
+
 
 void DWPEView::onWebProcessTerminated(WebKitWebView *webView, WebKitWebProcessTerminationReason reason, gpointer data)
 {
@@ -250,6 +550,19 @@ void DWPEView::onWebProcessTerminated(WebKitWebView *webView, WebKitWebProcessTe
 gboolean DWPEView::onUserMessageReceived(WebKitWebView *webView, WebKitUserMessage *message, gpointer data)
 {
     return FALSE;
+}
+
+void DWPEView::onMouseTargetChanged(WebKitWebView *webView, WebKitHitTestResult *hitTestResult, guint modifiers, gpointer data)
+{
+    // Change the Qt cursor shape based on the element under the mouse.
+    // WebKitHitTestResult contexts: LINK, IMAGE, MEDIA, EDITABLE, SCROLLBAR, SELECTION
+    auto *view = static_cast<DWPEView *>(data);
+    if (webkit_hit_test_result_context_is_link(hitTestResult))
+        view->setCursor(Qt::PointingHandCursor);
+    else if (webkit_hit_test_result_context_is_editable(hitTestResult))
+        view->setCursor(Qt::IBeamCursor);
+    else
+        view->setCursor(Qt::ArrowCursor);
 }
 
 void DWPEView::keyPressEvent(QKeyEvent *event)
@@ -298,6 +611,95 @@ void DWPEView::focusOutEvent(QFocusEvent *event)
 {
     m_eventTranslator->setFocused(false);
     QOpenGLWindow::focusOutEvent(event);
+}
+
+bool DWPEView::event(QEvent *event)
+{
+    // Handle input method events via event() since QWindow doesn't provide
+    // inputMethodEvent/inputMethodQuery virtual functions.
+    if (event->type() == QEvent::InputMethod) {
+        auto *imeEvent = static_cast<QInputMethodEvent *>(event);
+        if (m_imContext) {
+            if (!imeEvent->commitString().isEmpty()) {
+                // IME committed final text — forward to WebKit which
+                // inserts it into the focused editable element.
+                m_imContext->commitText(imeEvent->commitString());
+            } else if (!imeEvent->preeditString().isEmpty()) {
+                // Preedit (composition) text — find cursor position
+                // from attributes.
+                int cursorPos = imeEvent->preeditString().length();
+                for (const auto &attr : imeEvent->attributes()) {
+                    if (attr.type == QInputMethodEvent::Cursor) {
+                        cursorPos = attr.start;
+                        break;
+                    }
+                }
+                m_imContext->setPreeditText(imeEvent->preeditString(), cursorPos);
+            } else {
+                // Empty preedit with no commit — finish composition.
+                m_imContext->setPreeditText(QString(), 0);
+            }
+        }
+        return true;
+    }
+    if (event->type() == QEvent::InputMethodQuery) {
+        auto *queryEvent = static_cast<QInputMethodQueryEvent *>(event);
+        // Answer Qt's queries about the editable element's state so the
+        // platform input method can position the candidate window.
+        if (queryEvent->queries() & Qt::ImEnabled)
+            queryEvent->setValue(Qt::ImEnabled, QVariant(true));
+        if (queryEvent->queries() & Qt::ImCursorRectangle)
+            queryEvent->setValue(Qt::ImCursorRectangle, QVariant(QRect(0, 0, 1, 16)));
+        if (queryEvent->queries() & Qt::ImHints)
+            queryEvent->setValue(Qt::ImHints, QVariant(Qt::ImhNone));
+        return true;
+    }
+    return QOpenGLWindow::event(event);
+}
+
+gboolean DWPEView::onDecidePolicy(WebKitWebView *webView, WebKitPolicyDecision *decision, WebKitPolicyDecisionType type, gpointer data)
+{
+    // Allow all navigation actions (clicks, redirects, form submits).
+    // Without this handler, WebKit's default policy may ignore
+    // link clicks in embedded views.
+    Q_UNUSED(webView);
+    Q_UNUSED(type);
+    Q_UNUSED(data);
+    webkit_policy_decision_use(decision);
+    return TRUE;
+}
+
+WebKitWebView *DWPEView::onCreate(WebKitWebView *webView, WebKitNavigationAction *navigationAction, gpointer data)
+{
+    // Create a new WebView for new-window requests (target="_blank", etc.)
+    // The caller (DWPEView) manages the lifecycle via ready-to-show/close.
+    auto *view = static_cast<DWPEView *>(data);
+    auto *newView = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
+        "web-context", webkit_web_view_get_context(webView), nullptr));
+
+    // Connect the same signal handlers for the new view.
+    g_signal_connect(newView, "decide-policy", G_CALLBACK(onDecidePolicy), view);
+    g_signal_connect(newView, "load-changed", G_CALLBACK(onLoadChanged), view);
+    g_signal_connect(newView, "mouse-target-changed", G_CALLBACK(onMouseTargetChanged), view);
+
+    return newView;
+}
+
+void DWPEView::onReadyToShow(WebKitWebView *webView, gpointer data)
+{
+    // A new WebView created by onCreate is ready to display.
+    // Full multi-window embedding requires a new DWPEView + QOpenGLWindow
+    // pair for each new WebView. This is a stub — the host application
+    // should handle this signal to create and show a new window.
+    Q_UNUSED(webView);
+    Q_UNUSED(data);
+}
+
+void DWPEView::onClose(WebKitWebView *webView, gpointer data)
+{
+    // The WebView requested to close (e.g. window.close()).
+    Q_UNUSED(data);
+    webkit_web_view_try_close(webView);
 }
 
 DTKWPE_END_NAMESPACE

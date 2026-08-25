@@ -13,6 +13,10 @@
 
 #include <QGuiApplication>
 
+// wpe/input-xkb.h is included transitively via <wpe/wpe.h> in the header.
+// We only need xkbcommon for xkb_keymap_new_from_names.
+#include <xkbcommon/xkbcommon.h>
+
 DTKWPE_BEGIN_NAMESPACE
 
 // Qt::Key → Linux evdev keycode mapping table
@@ -121,17 +125,52 @@ DWPEEventTranslator::DWPEEventTranslator(struct wpe_view_backend *backend)
 {
 }
 
-DWPEEventTranslator::~DWPEEventTranslator() = default;
+DWPEEventTranslator::~DWPEEventTranslator()
+{
+    // The xkb context is a global singleton owned by libwpe; do not free it.
+}
+
+void DWPEEventTranslator::initializeXkbKeymap()
+{
+    // Build a default xkb keymap from the system's RMLVO (rules, model,
+    // layout, variant, options). This lets WPE convert evdev hardware
+    // keycodes into the correct Unicode characters for the user's layout.
+    m_xkbContext = wpe_input_xkb_context_get_default();
+    if (!m_xkbContext)
+        return;
+
+    struct xkb_context *xkbCtx = wpe_input_xkb_context_get_context(m_xkbContext);
+    if (!xkbCtx)
+        return;
+
+    struct xkb_rule_names names = {"evdev", "pc105", "us", "", ""};
+    struct xkb_keymap *keymap = xkb_keymap_new_from_names(xkbCtx, &names,
+                                                           XKB_KEYMAP_COMPILE_NO_FLAGS);
+    if (keymap)
+        wpe_input_xkb_context_set_keymap(m_xkbContext, keymap);
+}
 
 void DWPEEventTranslator::translateKeyEvent(QKeyEvent *event)
 {
     if (!m_backend)
         return;
 
+    // Evdev scancode from the Qt key mapping table.
+    uint32_t evdevCode = qtKeyToLinuxKeyCode(event->key());
+    // xkb keycodes are offset by +8 from Linux evdev scancodes
+    // (e.g. KEY_A=30 → xkb keycode 38). Both the WebProcess and our
+    // code use wpe_input_xkb_context_get_key_code() which expects the
+    // xkb-offset keycode, so we store the +8 value in hardware_key_code.
+    uint32_t xkbCode = evdevCode + 8;
     m_keyboardEvent.time = static_cast<uint32_t>(event->timestamp());
-    m_keyboardEvent.key_code = qtKeyToLinuxKeyCode(event->key());
-    m_keyboardEvent.hardware_key_code = m_keyboardEvent.key_code;
+    m_keyboardEvent.hardware_key_code = xkbCode;
     m_keyboardEvent.pressed = (event->type() == QEvent::KeyPress);
+
+    // Resolve the WPE key_code (keysym) from the xkb keycode.
+    if (m_xkbContext)
+        m_keyboardEvent.key_code = wpe_input_xkb_context_get_key_code(m_xkbContext, xkbCode, m_keyboardEvent.pressed);
+    else
+        m_keyboardEvent.key_code = xkbCode;
 
     // Modifiers
     uint32_t mods = 0;
@@ -144,7 +183,7 @@ void DWPEEventTranslator::translateKeyEvent(QKeyEvent *event)
     if (event->modifiers() & Qt::MetaModifier)
         mods |= wpe_input_keyboard_modifier_meta;
     m_keyboardEvent.modifiers = mods;
-
+    m_modifiers = mods;
     wpe_view_backend_dispatch_keyboard_event(m_backend, &m_keyboardEvent);
 }
 
@@ -153,6 +192,7 @@ void DWPEEventTranslator::translateMouseEvent(QMouseEvent *event)
     if (!m_backend)
         return;
 
+
     m_pointerEvent.type = wpe_input_pointer_event_type_button;
     m_pointerEvent.time = static_cast<uint32_t>(event->timestamp());
     m_pointerEvent.x = static_cast<int>(event->position().x() / m_devicePixelRatio);
@@ -160,6 +200,13 @@ void DWPEEventTranslator::translateMouseEvent(QMouseEvent *event)
 
     // Button mapping
     if (event->type() == QEvent::MouseMove) {
+        // Throttle mouse-move dispatches to avoid excessive repaints.
+        // Each dispatched motion event triggers a WPE frame, so limiting
+        // to ~60 FPS prevents CPU spikes during rapid cursor movement.
+        auto now = static_cast<uint32_t>(event->timestamp());
+        if (now - m_lastMouseMoveTime < kMouseMoveThrottleMs)
+            return;
+        m_lastMouseMoveTime = now;
         m_pointerEvent.type = wpe_input_pointer_event_type_motion;
         m_pointerEvent.button = 0;
         m_pointerEvent.state = 0;
@@ -203,10 +250,13 @@ void DWPEEventTranslator::translateWheelEvent(QWheelEvent *event)
     m_axisEvent.x = static_cast<int>(event->position().x() / m_devicePixelRatio);
     m_axisEvent.y = static_cast<int>(event->position().y() / m_devicePixelRatio);
 
+    // Pass keyboard modifiers so WebKit can detect Ctrl+wheel (zoom)
+    // and Shift+wheel (horizontal scroll).
+    m_axisEvent.modifiers = m_modifiers;
+
     // Vertical scroll
     m_axisEvent.axis = 0;
     m_axisEvent.value = -event->angleDelta().y() / 8;  // WPE expects steps
-
     wpe_view_backend_dispatch_axis_event(m_backend, &m_axisEvent);
 
     // Horizontal scroll (if any)

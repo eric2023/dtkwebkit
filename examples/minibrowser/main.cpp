@@ -14,13 +14,8 @@
 #include <DWidgetUtil>
 
 #include <QSurfaceFormat>
-#include <QOpenGLContext>
 #include <QWidget>
-#include <QTimer>
 #include <QDebug>
-
-#include <EGL/egl.h>
-
 #include "web_surface.h"
 #include "wpe_view.h"
 #include "wpe_bridge.h"
@@ -78,6 +73,9 @@ int main(int argc, char *argv[])
     fmt.setRenderableType(QSurfaceFormat::OpenGLES);
     QSurfaceFormat::setDefaultFormat(fmt);
 
+    // If a URL is given on the command line, load that instead of the test page.
+    QString urlToLoad = (argc > 1) ? QString::fromUtf8(argv[1]) : QString();
+
     DMainWindow window;
     window.resize(1024, 768);
     window.setWindowTitle("WPE MiniBrowser");
@@ -85,41 +83,46 @@ int main(int argc, char *argv[])
     auto *view = new DWPEView;
     window.setCentralWidget(QWidget::createWindowContainer(view, &window));
 
-    // Initialize WPE after the window's GL context is available
-    QTimer::singleShot(100, [view]() {
-        EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-        view->initializeWPE(display);
+    // WPE is initialized inside DWPEView::initializeGL() (which runs once the
+    // Qt GL context is current), and the wpeReady signal is emitted immediately
+    // after. Connect to it so scheme registration, bridge setup, and content
+    // loading all happen after both GL and WPE are fully initialized — no
+    // QTimer guessing about GL readiness.
+    QObject::connect(view, &DWPEView::wpeReady, [view, urlToLoad]() {
+        if (urlToLoad.isEmpty()) {
+            // Default: load the embedded test page via app:// scheme
+            auto *scheme = view->schemeHandler();
+            if (scheme) {
+                scheme->addResource("/", QByteArray(s_testHtml), "text/html");
+                scheme->addResource("/index.html", QByteArray(s_testHtml), "text/html");
+            }
 
-        // Register app:// resources
-        auto *scheme = view->schemeHandler();
-        if (scheme) {
-            scheme->addResource("/", QByteArray(s_testHtml), "text/html");
-            scheme->addResource("/index.html", QByteArray(s_testHtml), "text/html");
+            // Set up the JS bridge with a test channel
+            auto *bridge = view->bridge();
+            if (bridge) {
+                bridge->setMessageHandler([](const QVariantMap &msg) -> QVariant {
+                    qDebug() << "Bridge received:" << msg;
+                    QString channel = msg.value("channel").toString();
+                    QString method = msg.value("method").toString();
+
+                    if (channel == "test" && method == "ping") {
+                        QVariantMap reply;
+                        reply["status"] = "ok";
+                        reply["echo"] = msg.value("data");
+                        return reply;
+                    }
+
+                    return QVariant();
+                });
+            }
+
+            view->loadUrl("app:///index.html");
+            qDebug() << "WPE minibrowser ready, loading app:///index.html";
+        } else {
+            // Load an external URL (e.g. https://www.baidu.com)
+            view->loadUrl(urlToLoad);
+            qDebug() << "WPE minibrowser ready, loading" << urlToLoad;
         }
-
-        // Set up the JS bridge with a test channel
-        auto *bridge = view->bridge();
-        if (bridge) {
-            bridge->setMessageHandler([](const QVariantMap &msg) -> QVariant {
-                qDebug() << "Bridge received:" << msg;
-                QString channel = msg.value("channel").toString();
-                QString method = msg.value("method").toString();
-
-                if (channel == "test" && method == "ping") {
-                    QVariantMap reply;
-                    reply["status"] = "ok";
-                    reply["echo"] = msg.value("data");
-                    return reply;
-                }
-
-                return QVariant();
-            });
-        }
-
-        // Load via app:// scheme to test resource virtualization
-        view->loadUrl("app:///index.html");
-
-        qDebug() << "WPE minibrowser ready, loading app:///index.html";
     });
 
     moveToCenter(&window);

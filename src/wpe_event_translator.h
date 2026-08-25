@@ -15,6 +15,7 @@
 #include <QObject>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <cstdint>
 #include <wpe/wpe.h>
 #include <QTouchEvent>
 
@@ -41,6 +42,10 @@ public:
 
     void setViewBackend(::wpe_view_backend *backend) { m_backend = backend; }
 
+    // Initialize the xkb keymap so WPE can convert evdev keycodes to text.
+    // Must be called once after the backend is connected.
+    void initializeXkbKeymap();
+
     // Event dispatch
     void translateKeyEvent(QKeyEvent *event);
     void translateMouseEvent(QMouseEvent *event);
@@ -57,8 +62,19 @@ public:
 private:
     ::wpe_view_backend *m_backend{nullptr};
 
+
     // Qt::Key -> Linux evdev keycode mapping
     static uint32_t qtKeyToLinuxKeyCode(int qtKey);
+
+    // Track modifier state for xkb key code resolution
+    uint32_t m_modifiers{0};
+
+    // xkb keymap handle (for proper key→text conversion)
+    struct wpe_input_xkb_context *m_xkbContext{nullptr};
+
+    // Throttle mouse-move dispatches to avoid excessive repainting.
+    uint32_t m_lastMouseMoveTime{0};
+    static constexpr uint32_t kMouseMoveThrottleMs = 16; // ~60 FPS max
 
     // WPE input event structs (stack-allocated, dispatched immediately)
     struct wpe_input_keyboard_event m_keyboardEvent

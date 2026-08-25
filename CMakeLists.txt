@@ -58,6 +58,7 @@ add_library(dtkwebkit SHARED
     src/wpe_view.cpp
     src/wpe_event_translator.cpp
     src/wpe_scheme_handler.cpp
+    src/wpe_input_method_context.cpp
     src/wpe_bridge.cpp
     src/wpe_channel_adapter.cpp
 )
