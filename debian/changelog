@@ -1,0 +1,8 @@
+dtkwebkit (0.1.0-1) unstable; urgency=medium
+
+  * Initial release.
+  * WPE WebKit Qt6 embedding layer for UOS.
+  * Features: EGL rendering pipeline, app:// scheme, JS bridge,
+    QWebChannel 12-channel adapter, event translation.
+
+ -- UnionTech Software Technology Co., Ltd.  <dev@uniontech.com>  Mon, 24 Aug 2026 00:00:00 +0800
