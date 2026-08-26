@@ -1,5 +1,13 @@
 # Build directory
 build/
+# dpkg-buildpackage artifacts
+obj-*-linux-gnu*/
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/*.substvars
+debian/libdtkwebkit*/
+debian/tmp/
 
 # CMake generated files
 CMakeCache.txt

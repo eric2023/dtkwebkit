@@ -2,19 +2,20 @@ Source: dtkwebkit
 Section: libs
 Priority: optional
 Maintainer: UnionTech Software Technology Co., Ltd. <dev@uniontech.com>
-Build-Depends: cmake,
+Build-Depends: debhelper-compat (= 13),
+               cmake,
                pkg-config,
                qt6-base-dev (>= 6.5),
                libwpe-1.0-dev (>= 1.16),
-               libwpewebkit-dev (>= 2.46),
+               libwpewebkit-2.0-dev (>= 2.46),
                libwpebackend-fdo-1.0-dev (>= 1.12),
-               libegl1-mesa-dev,
-               libgles2-mesa-dev,
+               libegl-dev,
+               libgles-dev,
                libgstreamer1.0-dev (>= 1.20),
                libgstreamer-plugins-base1.0-dev (>= 1.20),
                libglib2.0-dev,
-               dtk6core-dev,
-               dtk6widget-dev
+               libdtk6core-dev,
+               libdtk6widget-dev
 Standards-Version: 4.6.0
 Rules-Requires-Root: no
 Homepage: https://github.com/linuxdeepin/dtkwebkit
@@ -34,7 +35,7 @@ Architecture: any
 Depends: libdtkwebkit0 (= ${binary:Version}),
          qt6-base-dev,
          libwpe-1.0-dev,
-         libwpewebkit-dev,
+         libwpewebkit-2.0-dev,
          ${misc:Depends}
 Description: Development files for WPE WebKit Qt6 embedding layer
  Header files and CMake config for developing applications with
