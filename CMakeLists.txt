@@ -17,6 +17,9 @@ endif()
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+set(CMAKE_EXPORT_NO_PACKAGE_REGISTRY ON)
+set(CMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY ON)
+set(FETCHCONTENT_FULLY_DISCONNECTED ON)
 include(FindPkgConfig)
 
 set(CMAKE_CXX_STANDARD 17)
