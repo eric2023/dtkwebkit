@@ -96,6 +96,21 @@ public:
     // Resize notification (WPE backend needs updated size)
     void setViewSize(int width, int height);
 
+    // --- DevTools / Inspector ---
+    bool isDevToolsEnabled() const { return m_devToolsEnabled; }
+    void setDevToolsEnabled(bool enabled);
+
+    // --- Sandbox ---
+    bool isSandboxEnabled() const { return m_sandboxEnabled; }
+    void setSandboxEnabled(bool enabled);
+
+    // --- Crash recovery ---
+    // When enabled, a crashed WebProcess is automatically restarted and
+    // the current page is reloaded. Defaults to true.
+    void setCrashRecoveryEnabled(bool enabled) { m_crashRecoveryEnabled = enabled; }
+    bool isCrashRecoveryEnabled() const { return m_crashRecoveryEnabled; }
+
+
 protected:
     void initializeGL() override;
     void resizeGL(int w, int h) override;
@@ -177,6 +192,19 @@ private:
     // --- WebKitWebView signal handlers ---
     static void onLoadChanged(WebKitWebView *webView, WebKitLoadEvent loadEvent, gpointer data);
     static void onWebProcessTerminated(WebKitWebView *webView, WebKitWebProcessTerminationReason reason, gpointer data);
+    // DevTools state
+    bool m_devToolsEnabled{false};
+    QString m_devToolsServerPath;  // inspector server address (host:port)
+
+    // Sandbox state
+    bool m_sandboxEnabled{true};
+
+    // Crash recovery state
+    bool m_crashRecoveryEnabled{true};
+    QString m_lastLoadedUrl;  // for crash-reload
+    int m_crashRetryCount{0};
+    static constexpr int kMaxCrashRetries = 3;
+
     static gboolean onUserMessageReceived(WebKitWebView *webView, WebKitUserMessage *message, gpointer data);
     static void onMouseTargetChanged(WebKitWebView *webView, WebKitHitTestResult *hitTestResult, guint modifiers, gpointer data);
     // --- decide-policy and create signal handlers ---
@@ -192,6 +220,8 @@ private:
     Q_SIGNAL void urlChanged(const QString &url);
     Q_SIGNAL void titleChanged(const QString &title);
     Q_SIGNAL void loadProgressChanged(int progress);
+    // Emitted when the WebProcess crashes (renderer terminated).
+    Q_SIGNAL void onRenderCrashed();
     // --- GL texture helpers ---
     void releaseCurrentImage();
     void releaseCurrentShmBuffer();

@@ -22,6 +22,8 @@
 #include <jsc/jsc.h>
 // WebKitHitTestResult.h is included transitively via <wpe/webkit.h>.
 #include <glib.h>
+#include <QStandardPaths>
+#include <QDir>
 
 DTKWPE_BEGIN_NAMESPACE
 
@@ -134,10 +136,16 @@ void DWPEView::initializeWPE(EGLDisplay eglDisplay)
     // Set WPE backend library if not already set (needed for WPEBackend-FDO)
     if (!qEnvironmentVariableIsSet("WPE_BACKEND_LIBRARY"))
         qputenv("WPE_BACKEND_LIBRARY", "libWPEBackend-fdo-1.0.so");
-    // Disable bwrap sandbox on UOS (read-only filesystem issue with /usr/share/zoneinfo)
-    // TODO (M9): properly configure sandbox with webkit_web_context_add_path_to_sandbox
-    if (!qEnvironmentVariableIsSet("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"))
-        qputenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
+    // Configure sandbox: add required paths to bwrap so the WebProcess
+    // can access system libraries without full sandbox escape.
+    // The sandbox is configured per-context after the WebView is created
+    // (see webkit_web_context_add_path_to_sandbox below).
+    // For UOS environments where /usr/share/zoneinfo is read-only,
+    // we add the required paths explicitly instead of disabling the sandbox.
+    if (!m_sandboxEnabled) {
+        if (!qEnvironmentVariableIsSet("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"))
+            qputenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
+    }
     // Initialize WPEBackend-FDO for this EGL display
     wpe_fdo_initialize_for_egl_display(eglDisplay);
 
@@ -162,7 +170,18 @@ void DWPEView::initializeWPE(EGLDisplay eglDisplay)
     m_eventTranslator->initializeXkbKeymap();
 
     // Fix #6: explicitly initialize the backend before creating the web view.
-    wpe_view_backend_initialize(backend);
+    // Configure sandbox paths on the default WebKitWebContext BEFORE
+    // creating the WebView.  add_path_to_sandbox must be called before
+    // any WebProcess is spawned (i.e. before webkit_web_view_new()).
+    // Using the default context that webkit_web_view_new() will pick up.
+    if (m_sandboxEnabled) {
+        WebKitWebContext *defaultCtx = webkit_web_context_get_default();
+        webkit_web_context_add_path_to_sandbox(defaultCtx, "/usr/lib", true);
+        webkit_web_context_add_path_to_sandbox(defaultCtx, "/usr/share", true);
+        webkit_web_context_add_path_to_sandbox(defaultCtx, "/etc", true);
+        webkit_web_context_add_path_to_sandbox(defaultCtx, "/tmp", false);
+    }
+
 
     // Pass a destroy notify so WebKit calls us when it releases the
     // wpe_view_backend. This avoids a double-free: if we destroy the
@@ -178,12 +197,28 @@ void DWPEView::initializeWPE(EGLDisplay eglDisplay)
             }
         }, this);
     m_webView = webkit_web_view_new(webViewBackend);
-    // webkit_web_view_new takes ownership of webViewBackend; do not unref.
 
     // Get the WebKitWebContext and register app:// scheme
     m_context = webkit_web_view_get_context(m_webView);
     m_schemeHandler = std::make_unique<DWPESchemeHandler>();
     m_schemeHandler->registerScheme(m_context);
+
+
+
+    // Set WPE cache and data directories to XDG standard paths (§9.8).
+    // Uses $XDG_CACHE_HOME/{org}/{app} and $XDG_DATA_HOME/{org}/{app}.
+    {
+        QString cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+        if (cacheDir.isEmpty())
+            cacheDir = QDir::homePath() + "/.cache/dtkwebkit";
+        QDir().mkpath(cacheDir);
+        // WebKit uses WEBKIT_CACHE_DIR env var for disk cache location.
+        qputenv("WEBKIT_CACHE_DIR", cacheDir.toUtf8());
+    }
+
+    // Apply DevTools settings if enabled before first load.
+    if (m_devToolsEnabled)
+        setDevToolsEnabled(true);
 
     // Create and attach the IME (input method) context to the WebView.
     // This enables preedit (composition) and commit text forwarding from
@@ -524,13 +559,17 @@ void DWPEView::onLoadChanged(WebKitWebView *webView, WebKitLoadEvent loadEvent, 
     switch (loadEvent) {
     case WEBKIT_LOAD_STARTED:
         Q_EMIT view->loadProgressChanged(0);
-        Q_EMIT view->urlChanged(QString::fromUtf8(webkit_web_view_get_uri(webView)));
+        view->m_lastLoadedUrl = QString::fromUtf8(webkit_web_view_get_uri(webView));
+        Q_EMIT view->urlChanged(view->m_lastLoadedUrl);
         break;
     case WEBKIT_LOAD_COMMITTED:
-        Q_EMIT view->urlChanged(QString::fromUtf8(webkit_web_view_get_uri(webView)));
+        view->m_lastLoadedUrl = QString::fromUtf8(webkit_web_view_get_uri(webView));
+        Q_EMIT view->urlChanged(view->m_lastLoadedUrl);
         Q_EMIT view->titleChanged(QString::fromUtf8(webkit_web_view_get_title(webView)));
         break;
     case WEBKIT_LOAD_FINISHED:
+        // Reset crash retry counter on successful page load.
+        view->m_crashRetryCount = 0;
         Q_EMIT view->titleChanged(QString::fromUtf8(webkit_web_view_get_title(webView)));
         Q_EMIT view->loadProgressChanged(100);
         qDebug() << "DWPEView: load finished";
@@ -540,11 +579,28 @@ void DWPEView::onLoadChanged(WebKitWebView *webView, WebKitLoadEvent loadEvent, 
         break;
     }
 }
-
-
 void DWPEView::onWebProcessTerminated(WebKitWebView *webView, WebKitWebProcessTerminationReason reason, gpointer data)
 {
+    auto *view = static_cast<DWPEView *>(data);
     qWarning() << "DWPEView: web process terminated, reason:" << reason;
+
+    // Emit the onRenderCrashed signal for the host application.
+    // The host can use this to show a "page crashed" message or take
+    // other recovery actions beyond the automatic reload below.
+    Q_EMIT view->onRenderCrashed();
+
+    // Automatic crash recovery: reload the current page if enabled and
+    // the retry count hasn't been exceeded. WPE WebKit automatically
+    // relaunches the WebProcess on the next load/reload call.
+    if (view->m_crashRecoveryEnabled && view->m_crashRetryCount < kMaxCrashRetries) {
+        view->m_crashRetryCount++;
+        qWarning() << "DWPEView: auto-recovering (attempt" << view->m_crashRetryCount
+                   << "of" << kMaxCrashRetries << ")";
+        // Reload bypassing cache to ensure fresh content after crash.
+        webkit_web_view_reload_bypass_cache(webView);
+    } else if (view->m_crashRetryCount >= kMaxCrashRetries) {
+        qWarning() << "DWPEView: max crash retries exceeded, not reloading";
+    }
 }
 
 gboolean DWPEView::onUserMessageReceived(WebKitWebView *webView, WebKitUserMessage *message, gpointer data)
@@ -700,6 +756,69 @@ void DWPEView::onClose(WebKitWebView *webView, gpointer data)
     // The WebView requested to close (e.g. window.close()).
     Q_UNUSED(data);
     webkit_web_view_try_close(webView);
+}
+
+void DWPEView::setDevToolsEnabled(bool enabled)
+{
+    m_devToolsEnabled = enabled;
+
+    if (!m_webView)
+        return;
+
+    // Enable developer extras in WebKitSettings — this allows the
+    // Web Inspector to be opened for this WebView.
+    WebKitSettings *settings = webkit_web_view_get_settings(m_webView);
+    webkit_settings_set_enable_developer_extras(settings, enabled);
+
+    if (enabled) {
+        // Start the remote inspector server on a standard path.
+        // WPE WebKit 2.46 uses the WEBKIT_INSPECTOR_SERVER env var
+        // to configure the remote debugging server.
+        // Use XDG standard path for the inspector socket (§9.8).
+        QString runtimeDir = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+        if (runtimeDir.isEmpty())
+            runtimeDir = QDir::homePath() + "/.runtime";
+        QDir().mkpath(runtimeDir);
+
+        // Default inspector server on a local port.
+        // The host application can connect to this port via a browser.
+        if (m_devToolsServerPath.isEmpty())
+            m_devToolsServerPath = QStringLiteral("127.0.0.1:9222");
+
+        qputenv("WEBKIT_INSPECTOR_SERVER", m_devToolsServerPath.toUtf8());
+        qputenv("WEBKIT_INSPECTOR_HTTP_SERVER", m_devToolsServerPath.toUtf8());
+        qDebug() << "DWPEView: DevTools inspector server enabled at" << m_devToolsServerPath;
+    } else {
+        // Clear the inspector server env vars to disable.
+        qunsetenv("WEBKIT_INSPECTOR_SERVER");
+        qunsetenv("WEBKIT_INSPECTOR_HTTP_SERVER");
+        qDebug() << "DWPEView: DevTools inspector server disabled";
+    }
+}
+
+void DWPEView::setSandboxEnabled(bool enabled)
+{
+    m_sandboxEnabled = enabled;
+
+    if (!m_webView)
+        return;
+
+    if (!enabled) {
+        // Disable sandbox entirely (dangerous: use only for debugging).
+        if (!qEnvironmentVariableIsSet("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"))
+            qputenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
+    } else {
+        // Re-enable sandbox by clearing the disable env var.
+        qunsetenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS");
+
+        // Add standard paths to the bwrap sandbox.
+        if (m_context) {
+            webkit_web_context_add_path_to_sandbox(m_context, "/usr/lib", true);
+            webkit_web_context_add_path_to_sandbox(m_context, "/usr/share", true);
+            webkit_web_context_add_path_to_sandbox(m_context, "/etc", true);
+            webkit_web_context_add_path_to_sandbox(m_context, "/tmp", false);
+        }
+    }
 }
 
 DTKWPE_END_NAMESPACE

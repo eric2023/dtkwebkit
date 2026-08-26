@@ -1,0 +1,58 @@
+# Based on dtkcore/dtkwidget .clang-format configuration.
+# Specification.md §9.2 — DTK code style.
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 130
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: true
+  AfterStruct: true
+  AfterUnion: true
+  AfterFunction: true
+  AfterControlStatement: Never
+  AfterNamespace: Never
+  BeforeElse: false
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+AccessModifierOffset: -4
+PointerAlignment: Right
+NamespaceIndentation: Inner
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+SpaceBeforeParens: ControlStatements
+SortIncludes: Never
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignTrailingComments: true
+AllowAllParametersOfDeclarationOnNextLine: true
+BinPackArguments: true
+BinPackParameters: true
+BreakConstructorInitializers: BeforeColon
+ConstructorInitializerIndentWidth: 4
+ContinuationIndentWidth: 4
+Cpp11BracedListStyle: true
+DerivePointerAlignment: false
+FixNamespaceComments: false
+IncludeBlocks: Preserve
+IndentCaseLabels: false
+IndentPPDirectives: None
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 2
+ReflowComments: true
+SortUsingDeclarations: false
+SpaceAfterCStyleCast: false
+SpaceAfterTemplateKeyword: true
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeParensOptions:
+  AfterControlStatements: true
+  AfterFunctionDefinitions: false
+  AfterFunctionDeclarations: false
+SpacesBeforeTrailingComments: 2
+Standard: c++17
