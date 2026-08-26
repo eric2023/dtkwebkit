@@ -99,8 +99,44 @@ static const char *s_userScript = R"JS(
                 }
             });
         }
-    });
-})();
+
+    // Tauri IPC compatibility: stub window.__TAURI_IPC__ so Tauri-built
+    // Vue/React apps can call native commands. The stub routes commands
+    // through our host bridge and resolves callbacks via window["_" + id].
+    // The Tauri app calls: window.__TAURI_IPC__({cmd, callback, error, ...args})
+    // and expects window["_" + callback](result) to be called.
+    window.__TAURI_IPC__ = function(opts) {
+        if (!opts || !opts.cmd) return;
+        var cmd = opts.cmd;
+        var callbackId = opts.callback;
+        var errorId = opts.error;
+        // Extract extra args (e.g. {name: "World"} for greet)
+        var args = {};
+        for (var k in opts) {
+            if (k !== 'cmd' && k !== 'callback' && k !== 'error')
+                args[k] = opts[k];
+        }
+        // Route through our host bridge
+        window.host.postMessage({channel: 'tauri', method: cmd, data: args}).then(
+            function(reply) {
+                // Tauri expects the callback to receive the result directly
+                if (callbackId && window['_' + callbackId]) {
+                    var result = reply;
+                    if (typeof reply === 'string') {
+                        try { result = JSON.parse(reply); } catch(e) {}
+                    }
+                    // Tauri greet returns a string, system_info returns an object
+                    // The callback expects the raw result (string for greet, object for info)
+                    window['_' + callbackId](result);
+                }
+            },
+            function(error) {
+                if (errorId && window['_' + errorId]) {
+                    window['_' + errorId](String(error));
+                }
+            }
+        );
+    };
 )JS";
 
 DWPEBridge::DWPEBridge(WebKitWebView *webView, QObject *parent)
@@ -138,6 +174,22 @@ void DWPEBridge::initialize()
 
     webkit_user_content_manager_add_script(m_ucm, script);
     webkit_user_script_unref(script);
+
+    // 4. Inject dark background at document end (when <body> exists).
+    // Tauri apps rely on the OS window's dark theme; without a body
+    // background, semi-transparent white elements (#ffffff14) are invisible.
+    static const char *s_bgScript = R"JS(
+        (function() {
+            var style = document.createElement('style');
+            style.id = 'dtkwebkit-dark-bg';
+            style.textContent = 'body{background:#1a1a2e !important;color:#fff;margin:0;}';
+            document.head.appendChild(style);
+        })();
+    )JS";
+    WebKitUserScript *bgScript = webkit_user_script_new(
+        s_bgScript, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_END, nullptr, nullptr);
+    webkit_user_content_manager_add_script(m_ucm, bgScript);
+    webkit_user_script_unref(bgScript);
 }
 
 void DWPEBridge::postMessage(const QVariant &message)

@@ -16,7 +16,8 @@
 #include <QSurfaceFormat>
 #include <QWidget>
 #include <QFileInfo>
-#include <QCoreApplication>
+#include <QSysInfo>
+#include <QThread>
 #include "web_surface.h"
 #include "wpe_view.h"
 #include "wpe_bridge.h"
@@ -122,6 +123,28 @@ int main(int argc, char *argv[])
                     reply["status"] = "ok";
                     reply["echo"] = msg.value("data");
                     return reply;
+                }
+
+                // Tauri IPC command handlers
+                if (channel == "tauri") {
+                    QVariantMap data = msg.value("data").toMap();
+
+                    if (method == "greet") {
+                        QString name = data.value("name").toString();
+                        if (name.isEmpty())
+                            name = "World";
+                        return QVariant(QString("Hello, %1! 你好 from DTK WebKit").arg(name));
+                    }
+
+                    if (method == "get_system_info") {
+                        QVariantMap info;
+                        info["os"] = QSysInfo::productType();
+                        info["arch"] = QSysInfo::currentCpuArchitecture();
+                        info["hostname"] = QSysInfo::machineHostName();
+                        info["cpu_count"] = QString::number(QThread::idealThreadCount());
+                        info["uptime"] = QString("N/A");
+                        return info;
+                    }
                 }
 
                 return QVariant();
