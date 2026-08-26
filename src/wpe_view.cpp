@@ -180,6 +180,13 @@ void DWPEView::initializeWPE(EGLDisplay eglDisplay)
         webkit_web_context_add_path_to_sandbox(defaultCtx, "/usr/share", true);
         webkit_web_context_add_path_to_sandbox(defaultCtx, "/etc", true);
         webkit_web_context_add_path_to_sandbox(defaultCtx, "/tmp", false);
+        // TLS: CA certificates are needed for HTTPS connections.
+        webkit_web_context_add_path_to_sandbox(defaultCtx, "/etc/ssl", true);
+        webkit_web_context_add_path_to_sandbox(defaultCtx, "/etc/ca-certificates", true);
+        webkit_web_context_add_path_to_sandbox(defaultCtx, "/usr/lib/ssl", true);
+        // Resolv.conf and hosts are needed for DNS resolution inside the sandbox.
+        webkit_web_context_add_path_to_sandbox(defaultCtx, "/etc/resolv.conf", true);
+        webkit_web_context_add_path_to_sandbox(defaultCtx, "/etc/hosts", true);
     }
 
 
@@ -202,6 +209,22 @@ void DWPEView::initializeWPE(EGLDisplay eglDisplay)
     m_context = webkit_web_view_get_context(m_webView);
     m_schemeHandler = std::make_unique<DWPESchemeHandler>();
     m_schemeHandler->registerScheme(m_context);
+
+    // Configure network TLS policy: ignore TLS errors so HTTPS content
+    // (video streams, etc.) can load even when the sandbox restricts
+    // certificate verification or the system CA store is incomplete.
+    WebKitNetworkSession *networkSession = webkit_web_view_get_network_session(m_webView);
+    if (networkSession)
+        webkit_network_session_set_tls_errors_policy(networkSession, WEBKIT_TLS_ERRORS_POLICY_IGNORE);
+
+    // Enable media playback (video/audio) in the WebKit settings.
+    WebKitSettings *settings = webkit_web_view_get_settings(m_webView);
+    webkit_settings_set_enable_media(settings, TRUE);
+    webkit_settings_set_enable_mediasource(settings, TRUE);
+    webkit_settings_set_enable_media_stream(settings, TRUE);
+    webkit_settings_set_enable_encrypted_media(settings, TRUE);
+    webkit_settings_set_media_playback_requires_user_gesture(settings, FALSE);
+    webkit_settings_set_media_playback_allows_inline(settings, TRUE);
 
 
 
@@ -839,6 +862,11 @@ void DWPEView::setSandboxEnabled(bool enabled)
             webkit_web_context_add_path_to_sandbox(m_context, "/usr/share", true);
             webkit_web_context_add_path_to_sandbox(m_context, "/etc", true);
             webkit_web_context_add_path_to_sandbox(m_context, "/tmp", false);
+            webkit_web_context_add_path_to_sandbox(m_context, "/etc/ssl", true);
+            webkit_web_context_add_path_to_sandbox(m_context, "/etc/ca-certificates", true);
+            webkit_web_context_add_path_to_sandbox(m_context, "/usr/lib/ssl", true);
+            webkit_web_context_add_path_to_sandbox(m_context, "/etc/resolv.conf", true);
+            webkit_web_context_add_path_to_sandbox(m_context, "/etc/hosts", true);
         }
     }
 }

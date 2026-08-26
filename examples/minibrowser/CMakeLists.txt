@@ -6,6 +6,7 @@ add_executable(minibrowser
 
 
 target_include_directories(minibrowser PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(minibrowser PRIVATE DTKWEBKIT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_compile_definitions(minibrowser PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(minibrowser
     PRIVATE

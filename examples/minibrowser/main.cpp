@@ -15,7 +15,8 @@
 
 #include <QSurfaceFormat>
 #include <QWidget>
-#include <QDebug>
+#include <QFileInfo>
+#include <QCoreApplication>
 #include "web_surface.h"
 #include "wpe_view.h"
 #include "wpe_bridge.h"
@@ -73,8 +74,27 @@ int main(int argc, char *argv[])
     fmt.setRenderableType(QSurfaceFormat::OpenGLES);
     QSurfaceFormat::setDefaultFormat(fmt);
 
-    // If a URL is given on the command line, load that instead of the test page.
+    // If a URL is given on the command line, load that instead of the Vue app.
     QString urlToLoad = (argc > 1) ? QString::fromUtf8(argv[1]) : QString();
+
+    // Locate the Vue dist/ directory relative to the executable or source tree.
+    QString distDir;
+    {
+        // Try: <exe-dir>/dist, <exe-dir>/../dist, source tree dist
+        QString exeDir = QCoreApplication::applicationDirPath();
+        QStringList candidates = {
+            exeDir + "/dist",
+            exeDir + "/../dist",
+            exeDir + "/../../examples/minibrowser/dist",
+            QStringLiteral(DTKWEBKIT_SOURCE_DIR "/examples/minibrowser/dist"),
+        };
+        for (const auto &c : candidates) {
+            if (QFileInfo::exists(c + "/index.html")) {
+                distDir = c;
+                break;
+            }
+        }
+    }
 
     DMainWindow window;
     window.resize(1024, 768);
@@ -88,38 +108,41 @@ int main(int argc, char *argv[])
     // after. Connect to it so scheme registration, bridge setup, and content
     // loading all happen after both GL and WPE are fully initialized — no
     // QTimer guessing about GL readiness.
-    QObject::connect(view, &DWPEView::wpeReady, [view, urlToLoad]() {
+    QObject::connect(view, &DWPEView::wpeReady, [view, urlToLoad, distDir]() {
+        // Set up the JS bridge with a test channel
+        auto *bridge = view->bridge();
+        if (bridge) {
+            bridge->setMessageHandler([](const QVariantMap &msg) -> QVariant {
+                qDebug() << "Bridge received:" << msg;
+                QString channel = msg.value("channel").toString();
+                QString method = msg.value("method").toString();
+
+                if (channel == "test" && method == "ping") {
+                    QVariantMap reply;
+                    reply["status"] = "ok";
+                    reply["echo"] = msg.value("data");
+                    return reply;
+                }
+
+                return QVariant();
+            });
+        }
+
         if (urlToLoad.isEmpty()) {
-            // Default: load the embedded test page via app:// scheme
             auto *scheme = view->schemeHandler();
             if (scheme) {
-                scheme->addResource("/", QByteArray(s_testHtml), "text/html");
-                scheme->addResource("/index.html", QByteArray(s_testHtml), "text/html");
+                // Load Vue dist/ if available, otherwise fall back to test HTML.
+                if (!distDir.isEmpty()) {
+                    scheme->loadFromDirectory(distDir);
+                    qDebug() << "WPE minibrowser ready, loading Vue app from" << distDir;
+                } else {
+                    scheme->addResource("/", QByteArray(s_testHtml), "text/html");
+                    scheme->addResource("/index.html", QByteArray(s_testHtml), "text/html");
+                    qDebug() << "WPE minibrowser ready, loading test HTML (dist/ not found)";
+                }
             }
-
-            // Set up the JS bridge with a test channel
-            auto *bridge = view->bridge();
-            if (bridge) {
-                bridge->setMessageHandler([](const QVariantMap &msg) -> QVariant {
-                    qDebug() << "Bridge received:" << msg;
-                    QString channel = msg.value("channel").toString();
-                    QString method = msg.value("method").toString();
-
-                    if (channel == "test" && method == "ping") {
-                        QVariantMap reply;
-                        reply["status"] = "ok";
-                        reply["echo"] = msg.value("data");
-                        return reply;
-                    }
-
-                    return QVariant();
-                });
-            }
-
             view->loadUrl("app:///index.html");
-            qDebug() << "WPE minibrowser ready, loading app:///index.html";
         } else {
-            // Load an external URL (e.g. https://www.baidu.com)
             view->loadUrl(urlToLoad);
             qDebug() << "WPE minibrowser ready, loading" << urlToLoad;
         }
