@@ -11,7 +11,7 @@
 #include "wpe_export.h"
 
 #include <wpe/webkit.h>
-#include <QString>
+#include <QRect>
 
 DTKWPE_BEGIN_NAMESPACE
 
@@ -51,6 +51,9 @@ public:
     // Called when the cursor position changes.
     void notifyCursorArea(int x, int y, int width, int height);
 
+    // Returns the last cursor rectangle reported by WebKit.
+    QRect cursorRect() const { return m_cursorRect; }
+
     // Called to reset the IM state (e.g. on focus change).
     void reset();
 
@@ -60,6 +63,7 @@ public:
 
 private:
     WebKitInputMethodContext *m_context{nullptr};
+    QRect m_cursorRect;
     QString m_currentPreedit;
 };
 

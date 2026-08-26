@@ -220,9 +220,11 @@ void DWPEInputMethodContext::notifyFocusOut()
 
 void DWPEInputMethodContext::notifyCursorArea(int x, int y, int width, int height)
 {
-    // Forward cursor position to Qt's input method so the candidate window
-    // appears at the correct location.
-    // This is handled by DWPEView::inputMethodQuery.
+    m_cursorRect = QRect(x, y, width, height);
+    // Forward the cursor rectangle to Qt's input method system so the
+    // platform IME (e.g. fcitx5) positions its candidate window at the
+    // correct on-screen location relative to the text cursor.
+    // The DWPEView reads this via inputMethodQuery(ImCursorRectangle).
 }
 
 void DWPEInputMethodContext::reset()

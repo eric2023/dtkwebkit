@@ -704,8 +704,12 @@ bool DWPEView::event(QEvent *event)
         // platform input method can position the candidate window.
         if (queryEvent->queries() & Qt::ImEnabled)
             queryEvent->setValue(Qt::ImEnabled, QVariant(true));
-        if (queryEvent->queries() & Qt::ImCursorRectangle)
-            queryEvent->setValue(Qt::ImCursorRectangle, QVariant(QRect(0, 0, 1, 16)));
+        if (queryEvent->queries() & Qt::ImCursorRectangle) {
+            QRect rect(0, 0, 1, 16);
+            if (m_imContext)
+                rect = m_imContext->cursorRect();
+            queryEvent->setValue(Qt::ImCursorRectangle, QVariant(rect));
+        }
         if (queryEvent->queries() & Qt::ImHints)
             queryEvent->setValue(Qt::ImHints, QVariant(Qt::ImhNone));
         return true;
@@ -715,30 +719,48 @@ bool DWPEView::event(QEvent *event)
 
 gboolean DWPEView::onDecidePolicy(WebKitWebView *webView, WebKitPolicyDecision *decision, WebKitPolicyDecisionType type, gpointer data)
 {
-    // Allow all navigation actions (clicks, redirects, form submits).
-    // Without this handler, WebKit's default policy may ignore
-    // link clicks in embedded views.
-    Q_UNUSED(webView);
-    Q_UNUSED(type);
-    Q_UNUSED(data);
+    // For navigation actions (link clicks, form submits, redirects), allow them.
+    // For new-window actions (target="_blank"), load the URL in the current
+    // view instead of creating a new WebView without a WPE backend — that
+    // would crash on the next interaction.
+    auto *view = static_cast<DWPEView *>(data);
+
+    if (type == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) {
+        // Extract the target URL and load it in the current view.
+        auto *navDecision = WEBKIT_NAVIGATION_POLICY_DECISION(decision);
+        auto *action = webkit_navigation_policy_decision_get_navigation_action(navDecision);
+        if (action) {
+            auto *request = webkit_navigation_action_get_request(action);
+            if (request) {
+                const char *uri = webkit_uri_request_get_uri(request);
+                if (uri)
+                    webkit_web_view_load_uri(webView, uri);
+            }
+        }
+        webkit_policy_decision_ignore(decision);
+        return TRUE;
+    }
+
+    // Default: allow the navigation.
     webkit_policy_decision_use(decision);
     return TRUE;
 }
 
 WebKitWebView *DWPEView::onCreate(WebKitWebView *webView, WebKitNavigationAction *navigationAction, gpointer data)
 {
-    // Create a new WebView for new-window requests (target="_blank", etc.)
-    // The caller (DWPEView) manages the lifecycle via ready-to-show/close.
-    auto *view = static_cast<DWPEView *>(data);
-    auto *newView = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
-        "web-context", webkit_web_view_get_context(webView), nullptr));
-
-    // Connect the same signal handlers for the new view.
-    g_signal_connect(newView, "decide-policy", G_CALLBACK(onDecidePolicy), view);
-    g_signal_connect(newView, "load-changed", G_CALLBACK(onLoadChanged), view);
-    g_signal_connect(newView, "mouse-target-changed", G_CALLBACK(onMouseTargetChanged), view);
-
-    return newView;
+    // New-window requests are handled in onDecidePolicy (NEW_WINDOW_ACTION)
+    // by loading the URL in the current view. This signal should not fire
+    // for those cases. If it does (e.g. window.open() bypassing policy),
+    // redirect the URL to the current view and return the same webView.
+    // Returning nullptr can crash WebKit; returning the same view makes
+    // WebKit reuse this view for the new "window".
+    auto *request = webkit_navigation_action_get_request(navigationAction);
+    if (request) {
+        const char *uri = webkit_uri_request_get_uri(request);
+        if (uri)
+            webkit_web_view_load_uri(webView, uri);
+    }
+    return webView;
 }
 
 void DWPEView::onReadyToShow(WebKitWebView *webView, gpointer data)

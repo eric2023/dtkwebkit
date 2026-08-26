@@ -245,7 +245,7 @@ void DWPEEventTranslator::translateWheelEvent(QWheelEvent *event)
     if (!m_backend)
         return;
 
-    m_axisEvent.type = wpe_input_axis_event_type_motion_smooth;
+    m_axisEvent.type = wpe_input_axis_event_type_motion;
     m_axisEvent.time = static_cast<uint32_t>(event->timestamp());
     m_axisEvent.x = static_cast<int>(event->position().x() / m_devicePixelRatio);
     m_axisEvent.y = static_cast<int>(event->position().y() / m_devicePixelRatio);
@@ -254,16 +254,21 @@ void DWPEEventTranslator::translateWheelEvent(QWheelEvent *event)
     // and Shift+wheel (horizontal scroll).
     m_axisEvent.modifiers = m_modifiers;
 
-    // Vertical scroll
+    // Vertical scroll: WPE axis 0.
+    // Qt angleDelta().y() > 0 = wheel up (content should scroll up, scrollY decreases).
+    // WPE axis-0 positive = scroll up (content moves down).
+    // So Qt positive maps directly to WPE positive — no negation needed.
     m_axisEvent.axis = 0;
-    m_axisEvent.value = -event->angleDelta().y() / 8;  // WPE expects steps
-    wpe_view_backend_dispatch_axis_event(m_backend, &m_axisEvent);
+    m_axisEvent.value = event->angleDelta().y() / 8;
+    if (m_axisEvent.value != 0)
+        wpe_view_backend_dispatch_axis_event(m_backend, &m_axisEvent);
 
     // Horizontal scroll (if any)
     if (event->angleDelta().x() != 0) {
         m_axisEvent.axis = 1;
         m_axisEvent.value = event->angleDelta().x() / 8;
-        wpe_view_backend_dispatch_axis_event(m_backend, &m_axisEvent);
+        if (m_axisEvent.value != 0)
+            wpe_view_backend_dispatch_axis_event(m_backend, &m_axisEvent);
     }
 }
 
