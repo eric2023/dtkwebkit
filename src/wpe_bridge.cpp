@@ -25,118 +25,122 @@ DTKWPE_BEGIN_NAMESPACE
 // postMessage uses window.webkit.messageHandlers.host.postMessage() which
 // returns a Promise (WPE WebKit 2.40+ with-reply API).
 static const char *s_userScript = R"JS(
+// User scripts in WebKit2 run in an ISOLATED JavaScript world, not the page's
+// main world. So window.host / window.__TAURI_IPC__ / window.qt set here are
+// invisible to the page's own scripts. To bridge this, we create a <script>
+// element whose textContent contains the bridge code and append it to the
+// DOM. The browser executes <script> elements in the MAIN world, making the
+// bridge visible to the page. This is the standard user-script → main-world
+// injection technique used by Greasemonkey and similar tools.
 (function() {
-    var messageId = 0;
-    var pendingPromises = {};
-    var channelCallbacks = {};
-
-    window.host = {
-        postMessage: function(msg) {
-            var id = ++messageId;
-            var payload = JSON.stringify({ id: id, data: msg });
-            // window.webkit.messageHandlers.host.postMessage returns a Promise
-            // (WPE with-reply handler). The native side resolves/rejects it.
-            return window.webkit.messageHandlers.host.postMessage(payload).then(
-                function(reply) {
-                    var result = reply;
-                    try { result = JSON.parse(reply); } catch(e) {}
-                    if (pendingPromises[id]) {
-                        pendingPromises[id].resolve(result);
-                        delete pendingPromises[id];
-                    }
-                    return result;
-                },
-                function(error) {
-                    if (pendingPromises[id]) {
-                        pendingPromises[id].reject(error);
-                        delete pendingPromises[id];
-                    }
-                    return Promise.reject(error);
-                }
-            );
-        },
-        onMessage: null,
-        // Called from native side to push data to JS
-        _resolve: function(id, result) {
-            if (pendingPromises[id]) {
-                pendingPromises[id].resolve(result);
-                delete pendingPromises[id];
-            }
-        },
-        _reject: function(id, error) {
-            if (pendingPromises[id]) {
-                pendingPromises[id].reject(error);
-                delete pendingPromises[id];
-            }
-        },
-        // Channel callback registration (for native -> JS signals)
-        _registerChannelCallback: function(channel, signal, callback) {
-            if (!channelCallbacks[channel]) channelCallbacks[channel] = {};
-            channelCallbacks[channel][signal] = callback;
-        },
-        // Called from native to deliver channel signals
-        _emitSignal: function(channel, signal, data) {
-            if (channelCallbacks[channel] && channelCallbacks[channel][signal]) {
-                channelCallbacks[channel][signal](data);
-            }
-        }
-    };
-
-    // QWebChannel compatibility: redefine window.qt as a Proxy
-    // so that qt.session.getUser() routes to window.host.postMessage
-    window.qt = new Proxy({}, {
-        get: function(_, channel) {
-            return new Proxy({}, {
-                get: function(_, method) {
-                    return function() {
-                        var args = Array.prototype.slice.call(arguments);
-                        return window.host.postMessage({
-                            channel: channel,
-                            method: method,
-                            data: args
-                        });
-                    };
-                }
-            });
-        }
-
-    // Tauri IPC compatibility: stub window.__TAURI_IPC__ so Tauri-built
-    // Vue/React apps can call native commands. The stub routes commands
-    // through our host bridge and resolves callbacks via window["_" + id].
-    // The Tauri app calls: window.__TAURI_IPC__({cmd, callback, error, ...args})
-    // and expects window["_" + callback](result) to be called.
-    window.__TAURI_IPC__ = function(opts) {
-        if (!opts || !opts.cmd) return;
-        var cmd = opts.cmd;
-        var callbackId = opts.callback;
-        var errorId = opts.error;
-        // Extract extra args (e.g. {name: "World"} for greet)
-        var args = {};
-        for (var k in opts) {
-            if (k !== 'cmd' && k !== 'callback' && k !== 'error')
-                args[k] = opts[k];
-        }
-        // Route through our host bridge
-        window.host.postMessage({channel: 'tauri', method: cmd, data: args}).then(
-            function(reply) {
-                // Tauri expects the callback to receive the result directly
-                if (callbackId && window['_' + callbackId]) {
-                    var result = reply;
-                    if (typeof reply === 'string') {
-                        try { result = JSON.parse(reply); } catch(e) {}
-                    }
-                    // Tauri greet returns a string, system_info returns an object
-                    // The callback expects the raw result (string for greet, object for info)
-                    window['_' + callbackId](result);
-                }
-            },
-            function(error) {
-                if (errorId && window['_' + errorId]) {
-                    window['_' + errorId](String(error));
-                }
-            }
-        );
-    };
+    var bridgeCode = [
+        "(function() {",
+        "    var messageId = 0;",
+        "    var pendingPromises = {};",
+        "    var channelCallbacks = {};",
+        "",
+        "    window.host = {",
+        "        postMessage: function(msg) {",
+        "            var id = ++messageId;",
+        "            var payload = JSON.stringify({ id: id, data: msg });",
+        "            return window.webkit.messageHandlers.host.postMessage(payload).then(",
+        "                function(reply) {",
+        "                    var result = reply;",
+        "                    try { result = JSON.parse(reply); } catch(e) {}",
+        "                    if (pendingPromises[id]) {",
+        "                        pendingPromises[id].resolve(result);",
+        "                        delete pendingPromises[id];",
+        "                    }",
+        "                    return result;",
+        "                },",
+        "                function(error) {",
+        "                    if (pendingPromises[id]) {",
+        "                        pendingPromises[id].reject(error);",
+        "                        delete pendingPromises[id];",
+        "                    }",
+        "                    return Promise.reject(error);",
+        "                }",
+        "            );",
+        "        },",
+        "        onMessage: null,",
+        "        _resolve: function(id, result) {",
+        "            if (pendingPromises[id]) {",
+        "                pendingPromises[id].resolve(result);",
+        "                delete pendingPromises[id];",
+        "            }",
+        "        },",
+        "        _reject: function(id, error) {",
+        "            if (pendingPromises[id]) {",
+        "                pendingPromises[id].reject(error);",
+        "                delete pendingPromises[id];",
+        "            }",
+        "        },",
+        "        _registerChannelCallback: function(channel, signal, callback) {",
+        "            if (!channelCallbacks[channel]) channelCallbacks[channel] = {};",
+        "            channelCallbacks[channel][signal] = callback;",
+        "        },",
+        "        _emitSignal: function(channel, signal, data) {",
+        "            if (channelCallbacks[channel] && channelCallbacks[channel][signal]) {",
+        "                channelCallbacks[channel][signal](data);",
+        "            }",
+        "        }",
+        "    };",
+        "",
+        "    // QWebChannel compatibility: window.qt proxy routes to host bridge",
+        "    window.qt = new Proxy({}, {",
+        "        get: function(_, channel) {",
+        "            return new Proxy({}, {",
+        "                get: function(_, method) {",
+        "                    return function() {",
+        "                        var args = Array.prototype.slice.call(arguments);",
+        "                        return window.host.postMessage({",
+        "                            channel: channel,",
+        "                            method: method,",
+        "                            data: args",
+        "                        });",
+        "                    };",
+        "                }",
+        "            });",
+        "        }",
+        "    });",
+        "",
+        "    // Tauri IPC compatibility: stub window.__TAURI_IPC__",
+        "    // Tauri apps call window.__TAURI_IPC__({cmd, callback, error, ...args})",
+        "    // and expect window['_' + callback](result) to be called.",
+        "    window.__TAURI_IPC__ = function(opts) {",
+        "        if (!opts || !opts.cmd) return;",
+        "        var cmd = opts.cmd;",
+        "        var callbackId = opts.callback;",
+        "        var errorId = opts.error;",
+        "        var args = {};",
+        "        for (var k in opts) {",
+        "            if (k !== 'cmd' && k !== 'callback' && k !== 'error')",
+        "                args[k] = opts[k];",
+        "        }",
+        "        window.host.postMessage({channel: 'tauri', method: cmd, data: args}).then(",
+        "            function(reply) {",
+        "                if (callbackId && window['_' + callbackId]) {",
+        "                    var result = reply;",
+        "                    if (typeof reply === 'string') {",
+        "                        try { result = JSON.parse(reply); } catch(e) {}",
+        "                    }",
+        "                    window['_' + callbackId](result);",
+        "                }",
+        "            },",
+        "            function(error) {",
+        "                if (errorId && window['_' + errorId]) {",
+        "                    window['_' + errorId](String(error));",
+        "                }",
+        "            }",
+        "        );",
+        "    };",
+        "})();"
+    ].join('\\n');
+    var s = document.createElement('script');
+    s.textContent = bridgeCode;
+    (document.head || document.documentElement).appendChild(s);
+    s.remove();
+})();
 )JS";
 
 DWPEBridge::DWPEBridge(WebKitWebView *webView, QObject *parent)
@@ -168,7 +172,11 @@ void DWPEBridge::initialize()
     if (!ok)
         qWarning() << "DWPEBridge: failed to register host message handler with reply";
 
-    // 3. Inject the bridge user script at document start
+    // 3. Inject the bridge user script at document start.
+    // User scripts run in an isolated world, so this script's job is to
+    // create a <script> DOM element with the bridge code — when the browser
+    // executes that element, it runs in the PAGE'S MAIN WORLD, making
+    // window.host / window.__TAURI_IPC__ / window.qt visible to the page.
     WebKitUserScript *script = webkit_user_script_new(
         s_userScript, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, nullptr, nullptr);
 
@@ -178,6 +186,8 @@ void DWPEBridge::initialize()
     // 4. Inject dark background at document end (when <body> exists).
     // Tauri apps rely on the OS window's dark theme; without a body
     // background, semi-transparent white elements (#ffffff14) are invisible.
+    // DOM changes are visible across all worlds, so this script can stay
+    // in the default (isolated) world.
     static const char *s_bgScript = R"JS(
         (function() {
             var style = document.createElement('style');
