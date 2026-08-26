@@ -214,14 +214,16 @@ private:
     static void onClose(WebKitWebView *webView, gpointer data);
 
     // IME context bridge
-    std::unique_ptr<DWPEInputMethodContext> m_imContext;
-
-    // Navigation-related signals for the host application.
+public:
+    // --- Host-facing signals (public) ---
     Q_SIGNAL void urlChanged(const QString &url);
     Q_SIGNAL void titleChanged(const QString &title);
     Q_SIGNAL void loadProgressChanged(int progress);
-    // Emitted when the WebProcess crashes (renderer terminated).
     Q_SIGNAL void onRenderCrashed();
+
+private:
+    // IME context bridge
+    std::unique_ptr<DWPEInputMethodContext> m_imContext;
     // --- GL texture helpers ---
     void releaseCurrentImage();
     void releaseCurrentShmBuffer();
