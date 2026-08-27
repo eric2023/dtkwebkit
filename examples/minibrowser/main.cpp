@@ -74,8 +74,7 @@ int main(int argc, char *argv[])
     // Request OpenGL ES 3.0+ context for WPE EGL compatibility
     QSurfaceFormat fmt;
     fmt.setVersion(3, 0);
-    fmt.setRenderableType(QSurfaceFormat::OpenGLES);
-    QSurfaceFormat::setDefaultFormat(fmt);
+    fmt.setAlphaBufferSize(8);
 
     // If a URL is given on the command line, load that instead of the Vue app.
     QString urlToLoad = (argc > 1) ? QString::fromUtf8(argv[1]) : QString();
@@ -101,15 +100,17 @@ int main(int argc, char *argv[])
 
     DMainWindow window;
     window.resize(1024, 768);
-    window.setWindowTitle("WPE MiniBrowser");
-    // Set the window background color via DWPEView API (not hardcoded in the
-    // library). The Vue demo app uses semi-transparent white elements that
-    // need a dark host background. This is the application's choice, not the
-    // library's — a different app could set a light or themed background.
+    window.setAttribute(Qt::WA_TranslucentBackground);
+    // Set a semi-transparent gray background (#F4F4F4 at 50% opacity) so the
+    // Wayland compositor composites it with whatever is behind the window,
+    // achieving a color-overlay effect. The library does NOT hardcode this —
+    // each application chooses its own background color and opacity.
     auto *view = new DWPEView;
-    view->setBackgroundColor(QColor(0x33, 0x33, 0x33, 0xCC));
-    window.setCentralWidget(QWidget::createWindowContainer(view, &window));
-
+    view->setBackgroundColor(QColor(0xF4, 0xF4, 0xF4, 0x80));
+    auto *container = QWidget::createWindowContainer(view, &window);
+    container->setAttribute(Qt::WA_TranslucentBackground);
+    container->setAutoFillBackground(false);
+    window.setCentralWidget(container);
 
     // WPE is initialized inside DWPEView::initializeGL() (which runs once the
     // Qt GL context is current), and the wpeReady signal is emitted immediately
