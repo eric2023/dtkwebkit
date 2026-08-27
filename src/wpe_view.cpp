@@ -204,12 +204,14 @@ void DWPEView::initializeWPE(EGLDisplay eglDisplay)
             }
         }, this);
     m_webView = webkit_web_view_new(webViewBackend);
-    // Set transparent WebView background so the page content determines
-    // what the user sees. The host application controls the window
-    // background color through Qt (QPalette, style sheet, etc.) — this
-    // transparent setting lets that show through wherever the page has
-    // no opaque background of its own.
-    WebKitColor bgColor{0.0, 0.0, 0.0, 0.0};
+    // Set the WPE WebView background to opaque. The host application controls
+    // the visible background color via setBackgroundColor(QColor). The WPE
+    // WebView itself is opaque — the page content is composited on top of an
+    // opaque clear color in paintGL, and window-level translucency (if desired)
+    // is achieved via QWindow::setWindowOpacity at the compositor level.
+    // Setting alpha=0 (transparent) triggers Mesa radeonsi SIGSEGV on AMD
+    // Picasso/Raven GPUs when GL_BLEND is used.
+    WebKitColor bgColor{0.0, 0.0, 0.0, 1.0};
     webkit_web_view_set_background_color(m_webView, &bgColor);
 
     // Get the WebKitWebContext and register app:// scheme
@@ -349,12 +351,10 @@ void DWPEView::paintGL()
         0, 0, static_cast<GLsizei>(width() * devicePixelRatioF()), static_cast<GLsizei>(height() * devicePixelRatioF()));
     glClearColor(m_bgColor.redF(), m_bgColor.greenF(), m_bgColor.blueF(), m_bgColor.alphaF());
     glClear(GL_COLOR_BUFFER_BIT);
-
-    // Enable alpha blending so the WPE texture's alpha channel mixes with
-    // the clear color. When the WPE WebView background is transparent, the
-    // page's transparent areas show the host-set clear color (m_bgColor).
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // NOTE: GL_BLEND is intentionally NOT enabled. The WPE texture covers the
+ // full viewport, so blending with the clear color is unnecessary.
+ // More importantly, enabling GL_BLEND with an alpha channel triggers a
+ // Mesa radeonsi driver SIGSEGV on AMD Picasso/Raven GPUs.
 
     std::lock_guard<std::mutex> lock(m_imageMutex);
     if (!m_currentImage && !m_currentShmBuffer) {
@@ -396,6 +396,7 @@ void DWPEView::paintGL()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     // Draw the full-screen quad using the GLES2 shader pipeline.
     glUseProgram(m_shaderProgram);
     glUniform1i(m_texUniform, 0);
@@ -415,9 +416,7 @@ void DWPEView::paintGL()
 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
-    glDisable(GL_BLEND);
 
-    glDisableVertexAttribArray(m_posAttr);
     glDisableVertexAttribArray(m_texCoordAttr);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glUseProgram(0);

@@ -73,7 +73,7 @@ int main(int argc, char *argv[])
 
     // Request OpenGL ES 3.0+ context for WPE EGL compatibility
     QSurfaceFormat fmt;
-    fmt.setVersion(3, 0);
+    fmt.setRenderableType(QSurfaceFormat::OpenGLES);
     // NOTE: Do NOT use setAlphaBufferSize(8) — it triggers a Mesa radeonsi
     // driver SIGSEGV (libgallium render thread) on AMD Picasso/Raven GPUs.
     // Use QWindow::setOpacity instead for compositor-level window transparency.
@@ -103,13 +103,12 @@ int main(int argc, char *argv[])
     DMainWindow window;
     window.resize(1024, 768);
     window.setWindowTitle("WPE MiniBrowser");
-    // Set a semi-transparent gray background (#F4F4F4 at 50% opacity) so the
-    // Wayland compositor composites it with whatever is behind the window,
-    // achieving a color-overlay effect. The library does NOT hardcode this —
-    // each application chooses its own background color and opacity.
-    // setWindowOpacity makes the whole window 50% transparent at the
-    // compositor level (no alpha GL context needed, avoids driver crash).
-    window.setWindowOpacity(0.5);
+    // Set the window background color via DWPEView API. The library renders
+    // the WPE page on an opaque clear color (no GL_BLEND, no alpha context —
+    // both trigger Mesa radeonsi SIGSEGV on AMD Picasso/Raven GPUs).
+    // Window-level translucency is achieved via setWindowOpacity at the
+    // compositor level, which the Wayland compositor handles without any
+    // GL alpha channel.
     auto *view = new DWPEView;
     view->setBackgroundColor(QColor(0xF4, 0xF4, 0xF4, 0xFF));
     window.setCentralWidget(QWidget::createWindowContainer(view, &window));

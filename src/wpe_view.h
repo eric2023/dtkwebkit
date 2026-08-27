@@ -189,11 +189,10 @@ private:
 
     // Event translator
     std::unique_ptr<DWPEEventTranslator> m_eventTranslator;
-    // Whether initializeWPE() has completed
     bool m_wpeReady{false};
 
     // Background clear color for paintGL (set by host via setBackgroundColor).
-    QColor m_bgColor{0, 0, 0, 0};  // transparent by default
+    QColor m_bgColor{0, 0, 0, 255};  // opaque black by default
 
     // GLib main context bridge: WPEBackend-FDO registers GSources on the GLib
     // default context. Qt's event loop doesn't dispatch GLib, so we pump it
