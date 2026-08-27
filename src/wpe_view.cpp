@@ -349,7 +349,8 @@ void DWPEView::setBackgroundColor(const QColor &color)
     // radeonsi SIGSEGV on AMD Picasso/Raven GPUs. A DOM-level CSS injection
     // is safe and achieves the same visual effect.
     if (m_webView) {
-        QString css = QString("body{background:%1 !important;}").arg(color.name());
+        QString css = QString("body{background:rgba(%1,%2,%3,%4) !important;}")
+                          .arg(color.red()).arg(color.green()).arg(color.blue()).arg(color.alphaF());
         QString js = QString("(function(){"
             "var s=document.getElementById('dtkwebkit-bg');"
             "if(!s){s=document.createElement('style');s.id='dtkwebkit-bg';"
@@ -365,9 +366,15 @@ void DWPEView::paintGL()
 {
     glViewport(
         0, 0, static_cast<GLsizei>(width() * devicePixelRatioF()), static_cast<GLsizei>(height() * devicePixelRatioF()));
-    glClearColor(m_bgColor.redF(), m_bgColor.greenF(), m_bgColor.blueF(), 1.0f);
+    glClearColor(m_bgColor.redF(), m_bgColor.greenF(), m_bgColor.blueF(), m_bgColor.alphaF());
     glClear(GL_COLOR_BUFFER_BIT);
-
+    // Enable alpha blending only when the host requests a semi-transparent
+    // background (alpha < 1.0). The WPE texture's alpha channel then mixes
+    // with the clear color, letting the compositor show what's behind.
+    if (m_bgColor.alphaF() < 1.0f) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    }
     std::lock_guard<std::mutex> lock(m_imageMutex);
     if (!m_currentImage && !m_currentShmBuffer) {
         return;
@@ -427,7 +434,7 @@ void DWPEView::paintGL()
 
 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
+    glDisable(GL_BLEND);
 
     glDisableVertexAttribArray(m_texCoordAttr);
     glBindBuffer(GL_ARRAY_BUFFER, 0);

@@ -76,8 +76,19 @@ int main(int argc, char *argv[])
     fmt.setVersion(3, 0);
     fmt.setRenderableType(QSurfaceFormat::OpenGLES);
     QSurfaceFormat::setDefaultFormat(fmt);
-    // If a URL is given on the command line, load that instead of the Vue app.
-    QString urlToLoad = (argc > 1) ? QString::fromUtf8(argv[1]) : QString();
+    // If a URL is given on the command line (not --translucent), load that instead.
+    QString urlToLoad;
+    {
+        for (int i = 1; i < argc; ++i) {
+            QString arg = QString::fromUtf8(argv[i]);
+            if (arg != "--translucent") { urlToLoad = arg; break; }
+        }
+    }
+
+    // --translucent: demonstrate semi-transparent background that lets the
+    // compositor show what's behind the window. Without this flag, the
+    // background is fully opaque (#F4F4F4).
+    bool translucent = (argc > 1 && QString::fromUtf8(argv[1]) == "--translucent");
 
     // Locate the Vue dist/ directory relative to the executable or source tree.
     QString distDir;
@@ -101,11 +112,19 @@ int main(int argc, char *argv[])
     DMainWindow window;
     window.resize(1024, 768);
     window.setWindowTitle("WPE MiniBrowser");
-    // Set the window background color via DWPEView API. The library renders
-    // the WPE page on an opaque clear color — no GL_BLEND, no alpha context,
-    // both of which trigger Mesa radeonsi SIGSEGV on AMD Picasso/Raven GPUs.
+    // Background color: opaque #F4F4F4 by default, or semi-transparent
+    // (#F4F4F4 at 50% alpha) with --translucent. The library handles both:
+    // opaque backgrounds use plain glClear; semi-transparent backgrounds
+    // additionally enable GL_BLEND and inject a CSS rgba() body background,
+    // so the WPE texture's alpha channel blends with the clear color.
+    // Window-level translucency (compositor showing what's behind) is
+    // achieved via QWindow::setWindowOpacity, which is compositor-side and
+    // does not require an alpha GL context.
+    QColor bgColor(0xF4, 0xF4, 0xF4, translucent ? 0x80 : 0xFF);
+    if (translucent)
+        window.setWindowOpacity(0.5);
     auto *view = new DWPEView;
-    view->setBackgroundColor(QColor(0xF4, 0xF4, 0xF4, 0xFF));
+    view->setBackgroundColor(bgColor);
     window.setCentralWidget(QWidget::createWindowContainer(view, &window));
 
     // WPE is initialized inside DWPEView::initializeGL() (which runs once the
@@ -113,12 +132,11 @@ int main(int argc, char *argv[])
     // after. Connect to it so scheme registration, bridge setup, and content
     // loading all happen after both GL and WPE are fully initialized — no
     // QTimer guessing about GL readiness.
-    QObject::connect(view, &DWPEView::wpeReady, [view, urlToLoad, distDir]() {
-        // Set up the JS bridge with a test channel
+    QObject::connect(view, &DWPEView::wpeReady, [view, urlToLoad, distDir, bgColor]() {
         // Re-apply background color after WPE WebView is created.
         // The initial call before wpeReady sets m_bgColor, but the WebView
-        // doesn't exist yet — this syncs the WPE WebView's own background.
-        view->setBackgroundColor(QColor(0xF4, 0xF4, 0xF4, 0xFF));
+        // doesn't exist yet — this call injects the CSS into the live page.
+        view->setBackgroundColor(bgColor);
         auto *bridge = view->bridge();
         if (bridge) {
             bridge->setMessageHandler([](const QVariantMap &msg) -> QVariant {

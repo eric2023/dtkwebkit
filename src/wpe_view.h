@@ -96,11 +96,12 @@ public:
     // Resize notification (WPE backend needs updated size)
     void setViewSize(int width, int height);
 
-    // Set the background color visible behind the web page content. Both
-    // paintGL's glClearColor and the WPE WebView's own background color are
-    // updated, so the page's transparent areas show this color.
-    // Must be opaque (alpha=255): alpha < 255 triggers Mesa radeonsi SIGSEGV
-    // on AMD Picasso/Raven GPUs. The WPE WebView background is always opaque.
+    // Set the background color visible behind the web page content. Supports
+    // both opaque (alpha=255) and semi-transparent (alpha<255) colors.
+    // For semi-transparent backgrounds, the library enables GL_BLEND in
+    // paintGL and injects a CSS rgba() background — the WPE texture's alpha
+    // channel blends with the clear color, letting the compositor show what's
+    // behind the window.
     void setBackgroundColor(const QColor &color);
     QColor backgroundColor() const { return m_bgColor; }
 
