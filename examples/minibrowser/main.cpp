@@ -107,7 +107,7 @@ int main(int argc, char *argv[])
     // need a dark host background. This is the application's choice, not the
     // library's — a different app could set a light or themed background.
     auto *view = new DWPEView;
-    view->setBackgroundColor(QColor(0x1a, 0x1a, 0x2e));
+    view->setBackgroundColor(QColor(0x33, 0x33, 0x33, 0xCC));
     window.setCentralWidget(QWidget::createWindowContainer(view, &window));
 
 
