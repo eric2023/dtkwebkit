@@ -74,7 +74,9 @@ int main(int argc, char *argv[])
     // Request OpenGL ES 3.0+ context for WPE EGL compatibility
     QSurfaceFormat fmt;
     fmt.setVersion(3, 0);
-    fmt.setAlphaBufferSize(8);
+    // NOTE: Do NOT use setAlphaBufferSize(8) — it triggers a Mesa radeonsi
+    // driver SIGSEGV (libgallium render thread) on AMD Picasso/Raven GPUs.
+    // Use QWindow::setOpacity instead for compositor-level window transparency.
 
     // If a URL is given on the command line, load that instead of the Vue app.
     QString urlToLoad = (argc > 1) ? QString::fromUtf8(argv[1]) : QString();
@@ -100,17 +102,17 @@ int main(int argc, char *argv[])
 
     DMainWindow window;
     window.resize(1024, 768);
-    window.setAttribute(Qt::WA_TranslucentBackground);
+    window.setWindowTitle("WPE MiniBrowser");
     // Set a semi-transparent gray background (#F4F4F4 at 50% opacity) so the
     // Wayland compositor composites it with whatever is behind the window,
     // achieving a color-overlay effect. The library does NOT hardcode this —
     // each application chooses its own background color and opacity.
+    // setWindowOpacity makes the whole window 50% transparent at the
+    // compositor level (no alpha GL context needed, avoids driver crash).
+    window.setWindowOpacity(0.5);
     auto *view = new DWPEView;
-    view->setBackgroundColor(QColor(0xF4, 0xF4, 0xF4, 0x80));
-    auto *container = QWidget::createWindowContainer(view, &window);
-    container->setAttribute(Qt::WA_TranslucentBackground);
-    container->setAutoFillBackground(false);
-    window.setCentralWidget(container);
+    view->setBackgroundColor(QColor(0xF4, 0xF4, 0xF4, 0xFF));
+    window.setCentralWidget(QWidget::createWindowContainer(view, &window));
 
     // WPE is initialized inside DWPEView::initializeGL() (which runs once the
     // Qt GL context is current), and the wpeReady signal is emitted immediately
