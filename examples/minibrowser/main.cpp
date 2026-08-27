@@ -114,23 +114,26 @@ int main(int argc, char *argv[])
         auto *bridge = view->bridge();
         if (bridge) {
             bridge->setMessageHandler([](const QVariantMap &msg) -> QVariant {
-                qDebug() << "Bridge received:" << msg;
-                QString channel = msg.value("channel").toString();
-                QString method = msg.value("method").toString();
+                // The JS bridge wraps messages as {id: N, data: {channel, method, data}}
+                // so channel/method/data are nested inside msg["data"].
+                QVariantMap data = msg.value("data").toMap();
+                QString channel = data.value("channel").toString();
+                QString method = data.value("method").toString();
+                qDebug() << "Bridge received:" << channel << method << data;
 
                 if (channel == "test" && method == "ping") {
                     QVariantMap reply;
                     reply["status"] = "ok";
-                    reply["echo"] = msg.value("data");
+                    reply["echo"] = data.value("data");
                     return reply;
                 }
 
                 // Tauri IPC command handlers
                 if (channel == "tauri") {
-                    QVariantMap data = msg.value("data").toMap();
+                    QVariantMap tauriData = data.value("data").toMap();
 
                     if (method == "greet") {
-                        QString name = data.value("name").toString();
+                        QString name = tauriData.value("name").toString();
                         if (name.isEmpty())
                             name = "World";
                         return QVariant(QString("Hello, %1! 你好 from DTK WebKit").arg(name));
