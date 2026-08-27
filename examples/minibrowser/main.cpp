@@ -75,6 +75,7 @@ int main(int argc, char *argv[])
     QSurfaceFormat fmt;
     fmt.setVersion(3, 0);
     fmt.setRenderableType(QSurfaceFormat::OpenGLES);
+    QSurfaceFormat::setDefaultFormat(fmt);
     // If a URL is given on the command line, load that instead of the Vue app.
     QString urlToLoad = (argc > 1) ? QString::fromUtf8(argv[1]) : QString();
 

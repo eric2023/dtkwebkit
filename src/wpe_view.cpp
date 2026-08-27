@@ -204,15 +204,10 @@ void DWPEView::initializeWPE(EGLDisplay eglDisplay)
             }
         }, this);
     m_webView = webkit_web_view_new(webViewBackend);
-    // Set the WPE WebView background to opaque. The host application controls
-    // the visible background color via setBackgroundColor(QColor). The WPE
-    // WebView itself is opaque — the page content is composited on top of an
-    // opaque clear color in paintGL, and window-level translucency (if desired)
-    // is achieved via QWindow::setWindowOpacity at the compositor level.
-    // Setting alpha=0 (transparent) triggers Mesa radeonsi SIGSEGV on AMD
-    // Picasso/Raven GPUs when GL_BLEND is used.
-    WebKitColor bgColor{0.0, 0.0, 0.0, 1.0};
-    webkit_web_view_set_background_color(m_webView, &bgColor);
+    // Do NOT call webkit_web_view_set_background_color — it triggers Mesa
+    // radeonsi SIGSEGV on AMD Picasso/Raven GPUs. The WPE WebView uses its
+    // default background. The host's background color is applied via
+    // glClearColor in paintGL.
 
     // Get the WebKitWebContext and register app:// scheme
     m_context = webkit_web_view_get_context(m_webView);
@@ -348,11 +343,21 @@ void DWPEView::resizeGL(int w, int h)
 void DWPEView::setBackgroundColor(const QColor &color)
 {
     m_bgColor = color;
-    // Sync the WPE WebView background so page transparent areas show this color.
-    // WPE WebView background must be opaque (alpha=1.0) to avoid Mesa driver crash.
+
+    // Inject CSS to set the page background color via evaluate_javascript.
+    // We cannot use webkit_web_view_set_background_color — it triggers Mesa
+    // radeonsi SIGSEGV on AMD Picasso/Raven GPUs. A DOM-level CSS injection
+    // is safe and achieves the same visual effect.
     if (m_webView) {
-        WebKitColor wpeColor{color.redF(), color.greenF(), color.blueF(), 1.0};
-        webkit_web_view_set_background_color(m_webView, &wpeColor);
+        QString css = QString("body{background:%1 !important;}").arg(color.name());
+        QString js = QString("(function(){"
+            "var s=document.getElementById('dtkwebkit-bg');"
+            "if(!s){s=document.createElement('style');s.id='dtkwebkit-bg';"
+            "document.head.appendChild(s);}"
+            "s.textContent='%1';"
+            "})();").arg(css);
+        webkit_web_view_evaluate_javascript(m_webView, js.toUtf8().constData(),
+            -1, nullptr, nullptr, nullptr, nullptr, nullptr);
     }
 }
 
@@ -360,12 +365,8 @@ void DWPEView::paintGL()
 {
     glViewport(
         0, 0, static_cast<GLsizei>(width() * devicePixelRatioF()), static_cast<GLsizei>(height() * devicePixelRatioF()));
-    glClearColor(m_bgColor.redF(), m_bgColor.greenF(), m_bgColor.blueF(), m_bgColor.alphaF());
+    glClearColor(m_bgColor.redF(), m_bgColor.greenF(), m_bgColor.blueF(), 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-    // NOTE: GL_BLEND is intentionally NOT enabled. The WPE texture covers the
- // full viewport, so blending with the clear color is unnecessary.
- // More importantly, enabling GL_BLEND with an alpha channel triggers a
- // Mesa radeonsi driver SIGSEGV on AMD Picasso/Raven GPUs.
 
     std::lock_guard<std::mutex> lock(m_imageMutex);
     if (!m_currentImage && !m_currentShmBuffer) {
@@ -621,6 +622,8 @@ void DWPEView::onLoadChanged(WebKitWebView *webView, WebKitLoadEvent loadEvent, 
         // document creation but before page scripts execute.
         if (view->m_bridge)
             view->m_bridge->injectIntoMainWorld();
+        // Re-inject background color CSS (page DOM is new after navigation).
+        view->setBackgroundColor(view->m_bgColor);
         break;
     case WEBKIT_LOAD_FINISHED:
         // Reset crash retry counter on successful page load.
