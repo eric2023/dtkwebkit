@@ -151,9 +151,12 @@ int main(int argc, char *argv[])
     // loading all happen after both GL and WPE are fully initialized — no
     // QTimer guessing about GL readiness.
     QObject::connect(view, &DWPEView::wpeReady, [view, urlToLoad, distDir, bgColor]() {
-        // Re-apply background color after WPE WebView is created.
-        // The initial call before wpeReady sets m_bgColor, but the WebView
-        // doesn't exist yet — this call injects the CSS into the live page.
+        // setBackgroundColor sets the GL clear color (fallback behind
+        // transparent WPE pixels). For the embedded Vue app, also call
+        // setPageBackgroundColor to inject a dark body background — the
+        // Vue app uses white text on transparent panels. For external
+        // URLs (e.g. Baidu), skip setPageBackgroundColor so the page's
+        // own background is respected.
         view->setBackgroundColor(bgColor);
         auto *bridge = view->bridge();
         if (bridge) {
@@ -207,13 +210,14 @@ int main(int argc, char *argv[])
                 return QVariant();
             });
         }
-
+        auto *scheme = view->schemeHandler();
         if (urlToLoad.isEmpty()) {
-            auto *scheme = view->schemeHandler();
             if (scheme) {
                 // Load Vue dist/ if available, otherwise fall back to test HTML.
                 if (!distDir.isEmpty()) {
                     scheme->loadFromDirectory(distDir);
+                    // Vue app expects a dark body background for white text visibility.
+                    view->setPageBackgroundColor(bgColor);
                     qDebug() << "WPE minibrowser ready, loading Vue app from" << distDir;
                 } else {
                     scheme->addResource("/", QByteArray(s_testHtml), "text/html");

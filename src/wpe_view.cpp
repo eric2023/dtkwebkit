@@ -344,28 +344,52 @@ void DWPEView::resizeGL(int w, int h)
 
 void DWPEView::setBackgroundColor(const QColor &color)
 {
-    m_bgColor = color;
-
-    // Inject CSS to set the page background color via evaluate_javascript.
-    // The CSS body background is always opaque (alpha=1.0) — it controls
-    // what color shows through the WPE page's transparent areas (e.g. the
-    // Vue app's semi-transparent panels). The QColor's alpha is NOT applied
-    // here; it is used by the fragment shader's u_alpha uniform to control
+    // Store the color for use as the GL clear color in paintGL. When the
+    // WPE texture has transparent pixels (e.g. the page body has no
+    // background), this color shows through. The QColor's alpha component
+    // is used by the fragment shader's u_alpha uniform to control
     // compositor-level content transparency (see paintGL).
-    // We cannot use webkit_web_view_set_background_color — it triggers Mesa
-    // radeonsi SIGSEGV on AMD Picasso/Raven GPUs.
-    if (m_webView) {
-        QString css = QString("body{background:rgb(%1,%2,%3) !important;}")
-                          .arg(color.red()).arg(color.green()).arg(color.blue());
-        QString js = QString("(function(){"
-            "var s=document.getElementById('dtkwebkit-bg');"
-            "if(!s){s=document.createElement('style');s.id='dtkwebkit-bg';"
-            "document.head.appendChild(s);}"
-            "s.textContent='%1';"
-            "})();").arg(css);
-        webkit_web_view_evaluate_javascript(m_webView, js.toUtf8().constData(),
-            -1, nullptr, nullptr, nullptr, nullptr, nullptr);
-    }
+    //
+    // We deliberately do NOT inject CSS to override the page's body
+    // background. Doing so with !important breaks external pages (e.g.
+    // Baidu's white background gets replaced) and can hide JS-rendered
+    // content. The page's own background renders in the WPE texture; the
+    // GL clear color only fills areas where the WPE texture is transparent.
+    //
+    // webkit_web_view_set_background_color triggers Mesa radeonsi SIGSEGV
+    // on AMD Picasso/Raven GPUs and must not be used.
+    m_bgColor = color;
+}
+
+void DWPEView::setPageBackgroundColor(const QColor &color)
+{
+    // Store the color so it can be re-injected after every navigation
+    // (LOAD_COMMITTED replaces the DOM). Inject now if the WebView exists.
+    // Use this for embedded apps (e.g. Vue) that expect a specific
+    // background color. Do NOT use for external URLs — it overrides the
+    // page's own background with !important.
+    // The CSS uses rgb() (opaque) — the QColor alpha is NOT applied here;
+    // it is controlled by the fragment shader's u_alpha uniform.
+    // webkit_web_view_set_background_color triggers Mesa radeonsi SIGSEGV
+    // on AMD Picasso/Raven GPUs and must not be used.
+    m_pageBgColor = color;
+    injectPageBackgroundCss();
+}
+
+void DWPEView::injectPageBackgroundCss()
+{
+    if (!m_webView || m_pageBgColor.alpha() == 0)
+        return;
+    QString css = QString("body{background:rgb(%1,%2,%3) !important;}")
+                      .arg(m_pageBgColor.red()).arg(m_pageBgColor.green()).arg(m_pageBgColor.blue());
+    QString js = QString("(function(){"
+        "var s=document.getElementById('dtkwebkit-bg');"
+        "if(!s){s=document.createElement('style');s.id='dtkwebkit-bg';"
+        "document.head.appendChild(s);}"
+        "s.textContent='%1';"
+        "})();").arg(css);
+    webkit_web_view_evaluate_javascript(m_webView, js.toUtf8().constData(),
+        -1, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 void DWPEView::paintGL()
@@ -379,7 +403,6 @@ void DWPEView::paintGL()
     glClearColor(m_bgColor.redF(), m_bgColor.greenF(), m_bgColor.blueF(),
                  m_bgColor.alphaF());
     glClear(GL_COLOR_BUFFER_BIT);
-    std::lock_guard<std::mutex> lock(m_imageMutex);
     if (!m_currentImage && !m_currentShmBuffer) {
         return;
     }
@@ -427,6 +450,10 @@ void DWPEView::paintGL()
     // screen), so they need a Y flip. SHM buffers from Wayland have a
     // top-left origin (row 0 = top of page); glTexImage2D puts row 0 at
     // t=0, and our quad maps screen-top to t=0, so no flip is needed.
+    glUniform1f(m_yFlipUniform, m_currentImage ? 1.0f : 0.0f);
+    // Compositor-level content transparency: multiply the WPE texture
+    // alpha by u_alpha (m_bgColor.alphaF()). Only effective when the
+    // window surface has an alpha channel (see setAlphaBufferSize).
     glUniform1f(m_alphaUniform, m_bgColor.alphaF());
 
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
@@ -436,9 +463,7 @@ void DWPEView::paintGL()
     glEnableVertexAttribArray(m_texCoordAttr);
     glVertexAttribPointer(m_texCoordAttr, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void *>(2 * sizeof(float)));
 
-
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
     glDisableVertexAttribArray(m_texCoordAttr);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glUseProgram(0);
@@ -485,9 +510,10 @@ void DWPEView::initShader()
     }
 
     m_posAttr = glGetAttribLocation(m_shaderProgram, "a_pos");
-    m_alphaUniform = glGetUniformLocation(m_shaderProgram, "u_alpha");
+    m_texCoordAttr = glGetAttribLocation(m_shaderProgram, "a_tex");
     m_texUniform = glGetUniformLocation(m_shaderProgram, "u_tex");
     m_yFlipUniform = glGetUniformLocation(m_shaderProgram, "u_yFlip");
+    m_alphaUniform = glGetUniformLocation(m_shaderProgram, "u_alpha");
     // Upload the full-screen quad into a VBO.
     glGenBuffers(1, &m_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
@@ -561,7 +587,12 @@ void DWPEView::handleExportedImage(struct wpe_fdo_egl_exported_image *image)
     if (m_exportable)
         wpe_view_backend_exportable_fdo_dispatch_frame_complete(m_exportable);
 
-    requestUpdate();
+    // Schedule a repaint so the new frame reaches the screen. requestUpdate()
+    // on QOpenGLWindow proved unreliable here (it did not always trigger
+    // paintGL after WPE delivered a frame). update() directly schedules the
+    // next paintGL — safe because these handlers run on the GUI thread via
+    // the GLib main-context pump.
+    update();
 }
 
 void DWPEView::handleShmBuffer(struct wpe_fdo_shm_exported_buffer *buffer)
@@ -587,9 +618,13 @@ void DWPEView::handleShmBuffer(struct wpe_fdo_shm_exported_buffer *buffer)
     if (m_exportable)
         wpe_view_backend_exportable_fdo_dispatch_frame_complete(m_exportable);
 
-    requestUpdate();
+    // Schedule a repaint so the new frame reaches the screen. requestUpdate()
+    // on QOpenGLWindow proved unreliable here (it did not always trigger
+    // paintGL after WPE delivered a frame). update() directly schedules the
+    // next paintGL — safe because these handlers run on the GUI thread via
+    // the GLib main-context pump.
+    update();
 }
-
 void DWPEView::releaseCurrentImage()
 {
     std::lock_guard<std::mutex> lock(m_imageMutex);
@@ -632,8 +667,9 @@ void DWPEView::onLoadChanged(WebKitWebView *webView, WebKitLoadEvent loadEvent, 
         // document creation but before page scripts execute.
         if (view->m_bridge)
             view->m_bridge->injectIntoMainWorld();
-        // Re-inject background color CSS (page DOM is new after navigation).
-        view->setBackgroundColor(view->m_bgColor);
+        // Re-inject the page background CSS (a new navigation replaces the
+        // DOM, wiping the previously injected <style> element).
+        view->injectPageBackgroundCss();
         break;
     case WEBKIT_LOAD_FINISHED:
         // Reset crash retry counter on successful page load.
@@ -641,23 +677,28 @@ void DWPEView::onLoadChanged(WebKitWebView *webView, WebKitLoadEvent loadEvent, 
         Q_EMIT view->titleChanged(QString::fromUtf8(webkit_web_view_get_title(webView)));
         Q_EMIT view->loadProgressChanged(100);
         qDebug() << "DWPEView: load finished";
-        // Force WPE to produce a new frame after JS frameworks (Vue, React,
-        // etc.) render their content. WPE only produces frames when the page
-        // changes; the initial frame is the raw HTML (typically an empty
-        // #app div). After the framework hydrates the DOM, WPE needs a DOM
-        // change to schedule a repaint. A trivial style toggle on <body>
-        // forces a layout invalidation and guarantees a fresh frame.
-        webkit_web_view_evaluate_javascript(webView,
-            "(function(){"
-            "document.body.style.opacity='0.9999';"
-            "requestAnimationFrame(function(){"
-            "  document.body.style.opacity='';"
-            "});"
-            "})();",
-            -1, nullptr, nullptr, nullptr, nullptr, nullptr);
-        break;
-    case WEBKIT_LOAD_REDIRECTED:
-        Q_EMIT view->urlChanged(QString::fromUtf8(webkit_web_view_get_uri(webView)));
+        // Force WPE to produce fresh frames after the page loads. JS
+        // frameworks (Vue, React, etc.) hydrate the DOM asynchronously after
+        // LOAD_FINISHED; WPE only produces a new frame when the page changes
+        // and stops once frames are delivered. A trivial DOM style toggle
+        // schedules a repaint, so a frame containing the framework-rendered
+        // content is produced. Trigger periodically over a generous window
+        // to cover the framework's async render pipeline and keep WPE
+        // producing frames until the content is fully rendered.
+        for (int delayMs = 0; delayMs <= 10000; delayMs += 400) {
+            QTimer::singleShot(delayMs, view, [view]() {
+                if (!view->m_webView)
+                    return;
+                webkit_web_view_evaluate_javascript(view->m_webView,
+                    "(function(){"
+                    "document.body.style.opacity='0.9999';"
+                    "requestAnimationFrame(function(){"
+                    "  document.body.style.opacity='';"
+                    "});"
+                    "})();",
+                    -1, nullptr, nullptr, nullptr, nullptr, nullptr);
+            });
+        }
         break;
     }
 }

@@ -106,7 +106,18 @@ public:
     //   2. Make the window translucent: DMainWindow::setTranslucentBackground(true)
     //   3. Set WA_TranslucentBackground on the createWindowContainer widget
     void setBackgroundColor(const QColor &color);
+    // Set the page body background via CSS injection. Use this for embedded
+    // apps that expect a specific background color (e.g. a Vue app with white
+    // text on a dark background). For external URLs, do NOT call this — it
+    // would override the page's own background with !important.
+    void setPageBackgroundColor(const QColor &color);
     QColor backgroundColor() const { return m_bgColor; }
+
+private:
+    // Inject the stored page background CSS into the current page DOM.
+    // Called from setPageBackgroundColor and from the LOAD_COMMITTED
+    // handler (a new navigation replaces the DOM).
+    void injectPageBackgroundCss();
 
     // --- DevTools / Inspector ---
     bool isDevToolsEnabled() const { return m_devToolsEnabled; }
@@ -198,6 +209,10 @@ private:
 
     // Background clear color for paintGL (set by host via setBackgroundColor).
     QColor m_bgColor{0, 0, 0, 255};  // opaque black by default
+    // Page body background color for CSS injection (set via
+    // setPageBackgroundColor). Re-injected on LOAD_COMMITTED because a new
+    // navigation replaces the DOM. Invalid (alpha==0) = no CSS injection.
+    QColor m_pageBgColor{0, 0, 0, 0};
 
     // GLib main context bridge: WPEBackend-FDO registers GSources on the GLib
     // default context. Qt's event loop doesn't dispatch GLib, so we pump it
