@@ -47,8 +47,10 @@ precision mediump float;
 varying vec2 v_tex;
 uniform sampler2D u_tex;
 uniform float u_yFlip;
+uniform float u_alpha;
 void main() {
-    gl_FragColor = texture2D(u_tex, vec2(v_tex.x, u_yFlip > 0.5 ? 1.0 - v_tex.y : v_tex.y));
+    vec4 c = texture2D(u_tex, vec2(v_tex.x, u_yFlip > 0.5 ? 1.0 - v_tex.y : v_tex.y));
+    gl_FragColor = vec4(c.rgb, c.a * u_alpha);
 }
 )GLSL";
 
@@ -366,15 +368,13 @@ void DWPEView::paintGL()
 {
     glViewport(
         0, 0, static_cast<GLsizei>(width() * devicePixelRatioF()), static_cast<GLsizei>(height() * devicePixelRatioF()));
-    glClearColor(m_bgColor.redF(), m_bgColor.greenF(), m_bgColor.blueF(), m_bgColor.alphaF());
+    // Clear to the background color. The fragment shader multiplies the
+    // WPE texture alpha by u_alpha (m_bgColor.alphaF()), so semi-transparent
+    // backgrounds produce framebuffer alpha < 1.0. The compositor then
+    // blends the content with what's behind the window.
+    glClearColor(m_bgColor.redF(), m_bgColor.greenF(), m_bgColor.blueF(),
+                 m_bgColor.alphaF());
     glClear(GL_COLOR_BUFFER_BIT);
-    // Enable alpha blending only when the host requests a semi-transparent
-    // background (alpha < 1.0). The WPE texture's alpha channel then mixes
-    // with the clear color, letting the compositor show what's behind.
-    if (m_bgColor.alphaF() < 1.0f) {
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    }
     std::lock_guard<std::mutex> lock(m_imageMutex);
     if (!m_currentImage && !m_currentShmBuffer) {
         return;
@@ -423,7 +423,7 @@ void DWPEView::paintGL()
     // screen), so they need a Y flip. SHM buffers from Wayland have a
     // top-left origin (row 0 = top of page); glTexImage2D puts row 0 at
     // t=0, and our quad maps screen-top to t=0, so no flip is needed.
-    glUniform1f(m_yFlipUniform, m_currentImage ? 1.0f : 0.0f);
+    glUniform1f(m_alphaUniform, m_bgColor.alphaF());
 
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
     const GLsizei stride = 4 * sizeof(float);
@@ -434,7 +434,6 @@ void DWPEView::paintGL()
 
 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glDisable(GL_BLEND);
 
     glDisableVertexAttribArray(m_texCoordAttr);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -482,7 +481,7 @@ void DWPEView::initShader()
     }
 
     m_posAttr = glGetAttribLocation(m_shaderProgram, "a_pos");
-    m_texCoordAttr = glGetAttribLocation(m_shaderProgram, "a_tex");
+    m_alphaUniform = glGetUniformLocation(m_shaderProgram, "u_alpha");
     m_texUniform = glGetUniformLocation(m_shaderProgram, "u_tex");
     m_yFlipUniform = glGetUniformLocation(m_shaderProgram, "u_yFlip");
     // Upload the full-screen quad into a VBO.

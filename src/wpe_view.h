@@ -96,12 +96,15 @@ public:
     // Resize notification (WPE backend needs updated size)
     void setViewSize(int width, int height);
 
-    // Set the background color visible behind the web page content. Supports
-    // both opaque (alpha=255) and semi-transparent (alpha<255) colors.
-    // For semi-transparent backgrounds, the library enables GL_BLEND in
-    // paintGL and injects a CSS rgba() background — the WPE texture's alpha
-    // channel blends with the clear color, letting the compositor show what's
-    // behind the window.
+    // Set the background color for the web page content. Supports both
+    // opaque (alpha=255) and semi-transparent (alpha<255) colors.
+    // For semi-transparent backgrounds, the fragment shader multiplies
+    // the WPE texture alpha by m_bgColor.alphaF(), so the framebuffer
+    // gets alpha < 1.0 — the compositor blends the content with what's
+    // behind the window. The application must also:
+    //   1. Request an alpha buffer: QSurfaceFormat::setAlphaBufferSize(8)
+    //   2. Make the window translucent: DMainWindow::setTranslucentBackground(true)
+    //   3. Set WA_TranslucentBackground on the createWindowContainer widget
     void setBackgroundColor(const QColor &color);
     QColor backgroundColor() const { return m_bgColor; }
 
@@ -180,6 +183,7 @@ private:
     GLint m_posAttr{0};
     GLint m_texCoordAttr{0};
     GLint m_texUniform{0};
+    GLint m_alphaUniform{0};
     GLint m_yFlipUniform{0};
     // EGL extension functions
 
