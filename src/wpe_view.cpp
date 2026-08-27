@@ -347,12 +347,16 @@ void DWPEView::setBackgroundColor(const QColor &color)
     m_bgColor = color;
 
     // Inject CSS to set the page background color via evaluate_javascript.
+    // The CSS body background is always opaque (alpha=1.0) — it controls
+    // what color shows through the WPE page's transparent areas (e.g. the
+    // Vue app's semi-transparent panels). The QColor's alpha is NOT applied
+    // here; it is used by the fragment shader's u_alpha uniform to control
+    // compositor-level content transparency (see paintGL).
     // We cannot use webkit_web_view_set_background_color — it triggers Mesa
-    // radeonsi SIGSEGV on AMD Picasso/Raven GPUs. A DOM-level CSS injection
-    // is safe and achieves the same visual effect.
+    // radeonsi SIGSEGV on AMD Picasso/Raven GPUs.
     if (m_webView) {
-        QString css = QString("body{background:rgba(%1,%2,%3,%4) !important;}")
-                          .arg(color.red()).arg(color.green()).arg(color.blue()).arg(color.alphaF());
+        QString css = QString("body{background:rgb(%1,%2,%3) !important;}")
+                          .arg(color.red()).arg(color.green()).arg(color.blue());
         QString js = QString("(function(){"
             "var s=document.getElementById('dtkwebkit-bg');"
             "if(!s){s=document.createElement('style');s.id='dtkwebkit-bg';"

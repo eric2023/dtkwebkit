@@ -10,7 +10,6 @@
  */
 
 #include <DMainWindow>
-#include <DTitlebar>
 #include <DApplication>
 #include <DWidgetUtil>
 
@@ -20,8 +19,7 @@
 #include <QFileInfo>
 #include <QSysInfo>
 #include <QThread>
-#include <QTimer>
-#include <QRect>
+#include <QFile>
 #include "web_surface.h"
 #include "wpe_view.h"
 #include "wpe_bridge.h"
@@ -75,7 +73,7 @@ int main(int argc, char *argv[])
 
     // --translucent: make the content area semi-transparent (50% alpha),
     // letting the compositor show what's behind. The title bar stays
-    // opaque. Without this flag, the background is fully opaque (#F4F4F4).
+    // opaque. Without this flag, the content is fully opaque.
     bool translucent = (argc > 1 && QString::fromUtf8(argv[1]) == "--translucent");
 
     // Request OpenGL ES 3.0+ context for WPE EGL compatibility.
@@ -118,32 +116,34 @@ int main(int argc, char *argv[])
     DMainWindow window;
     window.resize(1024, 768);
     window.setWindowTitle("WPE MiniBrowser");
-    QColor bgColor(0xF4, 0xF4, 0xF4, translucent ? 0x80 : 0xFF);
 
-    // For --translucent: use setTranslucentBackground so the DMainWindow
-    // surface is translucent. The title bar (DTitlebar) paints its own
-    // opaque background, so only the content area is affected.
-    if (translucent)
+    // Background color for the WPE page body. The Vue dist app uses white
+    // text and semi-transparent panels, so a dark background is required for
+    // visibility. The QColor alpha controls compositor-level transparency:
+    //   alpha=0xFF → opaque content (default)
+    //   alpha<0xFF → semi-transparent content (needs --translucent flag)
+    QColor bgColor(0x1A, 0x1A, 0x2E, translucent ? 0x80 : 0xFF);
+
+    // For --translucent: three things must all be set to get a 32-bit
+    // X11 visual with alpha:
+    //   1. DMainWindow::setTranslucentBackground(true) — DTK platform hook
+    //   2. WA_TranslucentBackground on the DMainWindow — Qt attribute
+    //   3. A stylesheet making the DMainWindow background transparent
+    // Without all three, the window stays 24-bit (no alpha channel) and
+    // the compositor ignores the framebuffer alpha. The DTitlebar paints
+    // its own opaque background, so the title bar is unaffected.
+    if (translucent) {
         window.setTranslucentBackground(true);
+        window.setAttribute(Qt::WA_TranslucentBackground, true);
+        window.setStyleSheet("DMainWindow { background: transparent; }");
+    }
 
     auto *view = new DWPEView;
     view->setBackgroundColor(bgColor);
-
-    if (translucent) {
-        // Translucent mode: embed DWPEView as a top-level child QWindow
-        // (parented to the DMainWindow's native handle) instead of using
-        // createWindowContainer. QWidget::createWindowContainer creates
-        // an opaque backing widget that discards the framebuffer alpha,
-        // preventing compositor-level transparency. A parented QWindow
-        // retains its alpha channel, so the compositor blends the content
-        // with what's behind the window. The view is positioned manually
-        // below the title bar and shown after the main window is visible.
-        // The view is positioned and shown after the main window is visible
-        // (see below, after window.show()).
-    } else {
-        // Opaque mode: createWindowContainer is fine.
-        window.setCentralWidget(QWidget::createWindowContainer(view, &window));
-    }
+    auto *container = QWidget::createWindowContainer(view, &window);
+    if (translucent)
+        container->setAttribute(Qt::WA_TranslucentBackground, true);
+    window.setCentralWidget(container);
 
     // WPE is initialized inside DWPEView::initializeGL() (which runs once the
     // Qt GL context is current), and the wpeReady signal is emitted immediately
@@ -230,28 +230,6 @@ int main(int argc, char *argv[])
 
     moveToCenter(&window);
     window.show();
-    // In translucent mode, position and show the DWPEView after the window
-    // is visible (windowHandle is needed for parenting).
-    if (translucent) {
-        view->setParent(window.windowHandle());
-        int titleH = window.titlebar() ? window.titlebar()->height() : 30;
-        view->setGeometry(window.frameGeometry().x(),
-                          window.frameGeometry().y() + titleH,
-                          window.width(), window.height() - titleH);
-        view->show();
-        // Keep the view positioned below the title bar on resize.
-        // QWindow has no resize signal, so we poll via a timer.
-        auto *resizeTimer = new QTimer;
-        resizeTimer->setInterval(100);
-        QObject::connect(resizeTimer, &QTimer::timeout, [view, &window, titleH]() {
-            QRect target(window.frameGeometry().x(),
-                          window.frameGeometry().y() + titleH,
-                          window.width(), window.height() - titleH);
-            if (view->geometry() != target)
-                view->setGeometry(target);
-        });
-        resizeTimer->start();
-    }
 
     return app->exec();
 }
