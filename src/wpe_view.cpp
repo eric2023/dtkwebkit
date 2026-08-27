@@ -204,6 +204,13 @@ void DWPEView::initializeWPE(EGLDisplay eglDisplay)
             }
         }, this);
     m_webView = webkit_web_view_new(webViewBackend);
+    // Set transparent WebView background so the page content determines
+    // what the user sees. The host application controls the window
+    // background color through Qt (QPalette, style sheet, etc.) — this
+    // transparent setting lets that show through wherever the page has
+    // no opaque background of its own.
+    WebKitColor bgColor{0.0, 0.0, 0.0, 0.0};
+    webkit_web_view_set_background_color(m_webView, &bgColor);
 
     // Get the WebKitWebContext and register app:// scheme
     m_context = webkit_web_view_get_context(m_webView);
@@ -340,8 +347,14 @@ void DWPEView::paintGL()
 {
     glViewport(
         0, 0, static_cast<GLsizei>(width() * devicePixelRatioF()), static_cast<GLsizei>(height() * devicePixelRatioF()));
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClearColor(m_bgColor.redF(), m_bgColor.greenF(), m_bgColor.blueF(), m_bgColor.alphaF());
     glClear(GL_COLOR_BUFFER_BIT);
+
+    // Enable alpha blending so the WPE texture's alpha channel mixes with
+    // the clear color. When the WPE WebView background is transparent, the
+    // page's transparent areas show the host-set clear color (m_bgColor).
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     std::lock_guard<std::mutex> lock(m_imageMutex);
     if (!m_currentImage && !m_currentShmBuffer) {
@@ -399,7 +412,10 @@ void DWPEView::paintGL()
     glEnableVertexAttribArray(m_texCoordAttr);
     glVertexAttribPointer(m_texCoordAttr, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void *>(2 * sizeof(float)));
 
+
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    glDisable(GL_BLEND);
 
     glDisableVertexAttribArray(m_posAttr);
     glDisableVertexAttribArray(m_texCoordAttr);

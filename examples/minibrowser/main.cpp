@@ -15,6 +15,7 @@
 
 #include <QSurfaceFormat>
 #include <QWidget>
+#include <QColor>
 #include <QFileInfo>
 #include <QSysInfo>
 #include <QThread>
@@ -101,9 +102,14 @@ int main(int argc, char *argv[])
     DMainWindow window;
     window.resize(1024, 768);
     window.setWindowTitle("WPE MiniBrowser");
-
+    // Set the window background color via DWPEView API (not hardcoded in the
+    // library). The Vue demo app uses semi-transparent white elements that
+    // need a dark host background. This is the application's choice, not the
+    // library's — a different app could set a light or themed background.
     auto *view = new DWPEView;
+    view->setBackgroundColor(QColor(0x1a, 0x1a, 0x2e));
     window.setCentralWidget(QWidget::createWindowContainer(view, &window));
+
 
     // WPE is initialized inside DWPEView::initializeGL() (which runs once the
     // Qt GL context is current), and the wpeReady signal is emitted immediately

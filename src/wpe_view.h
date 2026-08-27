@@ -96,6 +96,14 @@ public:
     // Resize notification (WPE backend needs updated size)
     void setViewSize(int width, int height);
 
+    // Set the background color used by paintGL's glClearColor. This is the
+    // color visible behind the web page content wherever the page has no
+    // opaque background of its own. Defaults to transparent (0,0,0,0).
+    // The WPE WebView itself is set to transparent (alpha=0) so the page
+    // content takes priority — this color only fills the "no content" areas.
+    void setBackgroundColor(const QColor &color) { m_bgColor = color; }
+    QColor backgroundColor() const { return m_bgColor; }
+
     // --- DevTools / Inspector ---
     bool isDevToolsEnabled() const { return m_devToolsEnabled; }
     void setDevToolsEnabled(bool enabled);
@@ -181,9 +189,11 @@ private:
 
     // Event translator
     std::unique_ptr<DWPEEventTranslator> m_eventTranslator;
-
     // Whether initializeWPE() has completed
     bool m_wpeReady{false};
+
+    // Background clear color for paintGL (set by host via setBackgroundColor).
+    QColor m_bgColor{0, 0, 0, 0};  // transparent by default
 
     // GLib main context bridge: WPEBackend-FDO registers GSources on the GLib
     // default context. Qt's event loop doesn't dispatch GLib, so we pump it

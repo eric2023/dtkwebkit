@@ -167,23 +167,11 @@ void DWPEBridge::initialize()
     gboolean ok = webkit_user_content_manager_register_script_message_handler_with_reply(m_ucm, "host", nullptr);
     if (!ok)
         qWarning() << "DWPEBridge: failed to register host message handler with reply";
-
-    // 3. Inject dark background at document end (DOM changes are visible
-    // across all worlds, so a user script in the isolated world works).
-    // Tauri apps rely on the OS window's dark theme; without a body
-    // background, semi-transparent white elements (#ffffff14) are invisible.
-    static const char *s_bgScript = R"JS(
-        (function() {
-            var style = document.createElement('style');
-            style.id = 'dtkwebkit-dark-bg';
-            style.textContent = 'body{background:#1a1a2e !important;color:#fff;margin:0;}';
-            document.head.appendChild(style);
-        })();
-    )JS";
-    WebKitUserScript *bgScript = webkit_user_script_new(
-        s_bgScript, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_END, nullptr, nullptr);
-    webkit_user_content_manager_add_script(m_ucm, bgScript);
-    webkit_user_script_unref(bgScript);
+    // No hardcoded background color injection. The library sets the WPE
+    // WebView background to transparent (webkit_web_view_set_background_color
+    // with alpha=0) and the Qt window's background color determines what the
+    // user sees. Web page content (CSS body background, etc.) takes priority
+    // wherever it specifies an opaque background.
 }
 
 void DWPEBridge::injectIntoMainWorld()
