@@ -345,6 +345,17 @@ void DWPEView::resizeGL(int w, int h)
                static_cast<GLsizei>(h * devicePixelRatioF()));
 }
 
+void DWPEView::setBackgroundColor(const QColor &color)
+{
+    m_bgColor = color;
+    // Sync the WPE WebView background so page transparent areas show this color.
+    // WPE WebView background must be opaque (alpha=1.0) to avoid Mesa driver crash.
+    if (m_webView) {
+        WebKitColor wpeColor{color.redF(), color.greenF(), color.blueF(), 1.0};
+        webkit_web_view_set_background_color(m_webView, &wpeColor);
+    }
+}
+
 void DWPEView::paintGL()
 {
     glViewport(

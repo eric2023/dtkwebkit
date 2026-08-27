@@ -73,11 +73,8 @@ int main(int argc, char *argv[])
 
     // Request OpenGL ES 3.0+ context for WPE EGL compatibility
     QSurfaceFormat fmt;
+    fmt.setVersion(3, 0);
     fmt.setRenderableType(QSurfaceFormat::OpenGLES);
-    // NOTE: Do NOT use setAlphaBufferSize(8) — it triggers a Mesa radeonsi
-    // driver SIGSEGV (libgallium render thread) on AMD Picasso/Raven GPUs.
-    // Use QWindow::setOpacity instead for compositor-level window transparency.
-
     // If a URL is given on the command line, load that instead of the Vue app.
     QString urlToLoad = (argc > 1) ? QString::fromUtf8(argv[1]) : QString();
 
@@ -104,11 +101,8 @@ int main(int argc, char *argv[])
     window.resize(1024, 768);
     window.setWindowTitle("WPE MiniBrowser");
     // Set the window background color via DWPEView API. The library renders
-    // the WPE page on an opaque clear color (no GL_BLEND, no alpha context —
-    // both trigger Mesa radeonsi SIGSEGV on AMD Picasso/Raven GPUs).
-    // Window-level translucency is achieved via setWindowOpacity at the
-    // compositor level, which the Wayland compositor handles without any
-    // GL alpha channel.
+    // the WPE page on an opaque clear color — no GL_BLEND, no alpha context,
+    // both of which trigger Mesa radeonsi SIGSEGV on AMD Picasso/Raven GPUs.
     auto *view = new DWPEView;
     view->setBackgroundColor(QColor(0xF4, 0xF4, 0xF4, 0xFF));
     window.setCentralWidget(QWidget::createWindowContainer(view, &window));
@@ -120,6 +114,10 @@ int main(int argc, char *argv[])
     // QTimer guessing about GL readiness.
     QObject::connect(view, &DWPEView::wpeReady, [view, urlToLoad, distDir]() {
         // Set up the JS bridge with a test channel
+        // Re-apply background color after WPE WebView is created.
+        // The initial call before wpeReady sets m_bgColor, but the WebView
+        // doesn't exist yet — this syncs the WPE WebView's own background.
+        view->setBackgroundColor(QColor(0xF4, 0xF4, 0xF4, 0xFF));
         auto *bridge = view->bridge();
         if (bridge) {
             bridge->setMessageHandler([](const QVariantMap &msg) -> QVariant {
