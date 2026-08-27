@@ -18,6 +18,7 @@
 #include <QFileInfo>
 #include <QSysInfo>
 #include <QThread>
+#include <QFile>
 #include "web_surface.h"
 #include "wpe_view.h"
 #include "wpe_bridge.h"
@@ -145,7 +146,17 @@ int main(int argc, char *argv[])
                         info["arch"] = QSysInfo::currentCpuArchitecture();
                         info["hostname"] = QSysInfo::machineHostName();
                         info["cpu_count"] = QString::number(QThread::idealThreadCount());
-                        info["uptime"] = QString("N/A");
+                        {
+                            QFile f("/proc/uptime");
+                            if (f.open(QIODevice::ReadOnly)) {
+                                double secs = f.readAll().split(' ')[0].toDouble();
+                                int hours = int(secs) / 3600;
+                                int mins = (int(secs) % 3600) / 60;
+                                info["uptime"] = QString("%1h %2m").arg(hours).arg(mins);
+                            } else {
+                                info["uptime"] = QString("unknown");
+                            }
+                        }
                         return info;
                     }
                 }

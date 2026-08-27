@@ -12,6 +12,7 @@
 #include <QDebug>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 
 #include <wpe/webkit.h>
 #include <jsc/jsc.h>
@@ -122,12 +123,10 @@ static const char *s_mainWorldScript = R"JS(
         }
         window.host.postMessage({channel: 'tauri', method: cmd, data: args}).then(
             function(reply) {
+                // postMessage already did JSON.parse on the raw reply, so
+                // 'reply' is the final value (string for greet, object for info).
                 if (callbackId && window['_' + callbackId]) {
-                    var result = reply;
-                    if (typeof reply === 'string') {
-                        try { result = JSON.parse(reply); } catch(e) {}
-                    }
-                    window['_' + callbackId](result);
+                    window['_' + callbackId](reply);
                 }
             },
             function(error) {
@@ -236,12 +235,24 @@ gboolean DWPEBridge::onScriptMessageReceived(WebKitUserContentManager *ucm,
     // Call the message handler
     QVariant result = bridge->m_messageHandler(msgData);
 
-    // Return reply to JS (resolves the Promise)
+    // Return reply to JS (resolves the Promise).
+    // The JS postMessage handler does JSON.parse(reply), so the reply
+    // must be a valid JSON value: a quoted string for QString results,
+    // or a JSON object/array for QVariantMap/QVariantList results.
     if (reply) {
         JSCContext *context = jsc_value_get_context(value);
         if (result.isValid()) {
-            QJsonDocument replyDoc = QJsonDocument::fromVariant(result);
-            QByteArray replyJson = replyDoc.toJson(QJsonDocument::Compact);
+            QByteArray replyJson;
+            if (result.typeId() == QMetaType::QString) {
+                // QJsonDocument::fromVariant can't serialize a bare QString.
+                // Wrap in a one-element array, serialize, strip the brackets:
+                // ["Hello"] → "Hello" (valid JSON string literal for JSON.parse).
+                QJsonArray arr{result.toString()};
+                auto full = QJsonDocument(arr).toJson(QJsonDocument::Compact);
+                replyJson = full.mid(1, full.size() - 2);  // remove [ and ]
+            } else {
+                replyJson = QJsonDocument::fromVariant(result).toJson(QJsonDocument::Compact);
+            }
             JSCValue *replyValue = jsc_value_new_string(context, replyJson.constData());
             webkit_script_message_reply_return_value(reply, replyValue);
             g_object_unref(replyValue);
