@@ -641,6 +641,20 @@ void DWPEView::onLoadChanged(WebKitWebView *webView, WebKitLoadEvent loadEvent, 
         Q_EMIT view->titleChanged(QString::fromUtf8(webkit_web_view_get_title(webView)));
         Q_EMIT view->loadProgressChanged(100);
         qDebug() << "DWPEView: load finished";
+        // Force WPE to produce a new frame after JS frameworks (Vue, React,
+        // etc.) render their content. WPE only produces frames when the page
+        // changes; the initial frame is the raw HTML (typically an empty
+        // #app div). After the framework hydrates the DOM, WPE needs a DOM
+        // change to schedule a repaint. A trivial style toggle on <body>
+        // forces a layout invalidation and guarantees a fresh frame.
+        webkit_web_view_evaluate_javascript(webView,
+            "(function(){"
+            "document.body.style.opacity='0.9999';"
+            "requestAnimationFrame(function(){"
+            "  document.body.style.opacity='';"
+            "});"
+            "})();",
+            -1, nullptr, nullptr, nullptr, nullptr, nullptr);
         break;
     case WEBKIT_LOAD_REDIRECTED:
         Q_EMIT view->urlChanged(QString::fromUtf8(webkit_web_view_get_uri(webView)));
