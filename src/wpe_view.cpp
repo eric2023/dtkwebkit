@@ -589,6 +589,12 @@ void DWPEView::onLoadChanged(WebKitWebView *webView, WebKitLoadEvent loadEvent, 
         view->m_lastLoadedUrl = QString::fromUtf8(webkit_web_view_get_uri(webView));
         Q_EMIT view->urlChanged(view->m_lastLoadedUrl);
         Q_EMIT view->titleChanged(QString::fromUtf8(webkit_web_view_get_title(webView)));
+        // Inject bridge code (window.host, __TAURI_IPC__, qt) into the page's
+        // main JavaScript world. User scripts run in an isolated world, so
+        // evaluate_javascript is used instead. LOAD_COMMITTED fires after
+        // document creation but before page scripts execute.
+        if (view->m_bridge)
+            view->m_bridge->injectIntoMainWorld();
         break;
     case WEBKIT_LOAD_FINISHED:
         // Reset crash retry counter on successful page load.

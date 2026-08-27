@@ -47,8 +47,13 @@ public:
     explicit DWPEBridge(WebKitWebView *webView, QObject *parent = nullptr);
     ~DWPEBridge() override;
 
-    // Initialize: inject user script, register message handler, connect signals
+    // Initialize: register message handler, inject dark-bg user script
     void initialize();
+
+    // Inject the bridge code (window.host, __TAURI_IPC__, qt) into the page's
+    // main JavaScript world via evaluate_javascript. Called on LOAD_COMMITTED
+    // since user scripts run in an isolated world and are invisible to page JS.
+    void injectIntoMainWorld();
 
     // Send message JS-ward (native -> JS): calls window.host.onMessage(data)
     void postMessage(const QVariant &message);
