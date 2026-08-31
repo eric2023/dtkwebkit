@@ -208,8 +208,14 @@ void DWPEEventTranslator::translateMouseEvent(QMouseEvent *event)
             return;
         m_lastMouseMoveTime = now;
         m_pointerEvent.type = wpe_input_pointer_event_type_motion;
-        m_pointerEvent.button = 0;
-        m_pointerEvent.state = 0;
+        // While a button is pressed (drag), carry the pressed button in the
+        // motion event's `button` field and set `state` to the press state.
+        // WebKit's EventHandler::handleMouseDraggedEvent only starts text
+        // selection when the motion event's button == Left; sending button=0
+        // during a drag makes WebKit think no button is active and the drag
+        // is never recognized as a selection drag.
+        m_pointerEvent.button = m_mousePressedButton;
+        m_pointerEvent.state = m_mousePressedButton ? 1 : 0;
     } else {
         uint32_t button = 0;
         uint32_t state = 0;
@@ -225,6 +231,9 @@ void DWPEEventTranslator::translateMouseEvent(QMouseEvent *event)
         }
         m_pointerEvent.button = button;
         m_pointerEvent.state = state;
+        // Track the currently pressed button so subsequent motion events
+        // (drag) carry it. Cleared on button release.
+        m_mousePressedButton = state ? button : 0;
     }
 
     // Modifiers

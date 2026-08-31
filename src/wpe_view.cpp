@@ -20,9 +20,9 @@
 #include <QOpenGLShaderProgram>
 #include <QInputMethodQueryEvent>
 #include <jsc/jsc.h>
-// WebKitHitTestResult.h is included transitively via <wpe/webkit.h>.
 #include <glib.h>
 #include <QStandardPaths>
+// WebKitHitTestResult.h is included transitively via <wpe/webkit.h>.
 #include <QDir>
 
 DTKWPE_BEGIN_NAMESPACE
@@ -392,6 +392,140 @@ void DWPEView::injectPageBackgroundCss()
         -1, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
+namespace {
+// Drag-to-select fallback, injected into the page's main JavaScript world.
+//
+// Rationale: the Debian wpewebkit 2.46.3 package is built with
+// ENABLE_DRAG_SUPPORT=OFF, so WebCore's handleMouseDraggedEvent /
+// updateSelectionForMouseDrag / handleDrag are compiled out. Dragging the
+// mouse over text therefore never selects it. This script mirrors the
+// gesture with capture-phase listeners and, only when the native selection
+// is still empty, extends window.getSelection() itself. See
+// DWPEView::setDragSelectEnabled.
+const char *s_dragSelectFallbackScript = R"JS(
+(function() {
+    if (window.__dtkwebkitDragSelect) return;
+    window.__dtkwebkitDragSelect = true;
+
+    function elFromPoint(x, y) {
+        if (document.elementFromPoint)
+            return document.elementFromPoint(x, y);
+        return null;
+    }
+
+    function userSelectOf(node) {
+        if (!node || !node.nodeType || node.nodeType !== 1) return '';
+        var cs = window.getComputedStyle(node, null);
+        return (cs && cs.userSelect) ? cs.userSelect :
+               (cs && cs.webkitUserSelect) ? cs.webkitUserSelect : '';
+    }
+
+    function hasDraggableAncestor(node) {
+        var n = node;
+        while (n && n.nodeType === 1) {
+            if ((n.getAttribute && n.getAttribute('draggable') === 'true') || n.draggable)
+                return true;
+            n = n.parentNode;
+        }
+        return false;
+    }
+
+    function hasEditableAncestor(node) {
+        var n = node;
+        while (n && n.nodeType === 1) {
+            if (n.isContentEditable)
+                return true;
+            var t = n.tagName;
+            if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT' || t === 'OPTION')
+                return true;
+            n = n.parentNode;
+        }
+        return false;
+    }
+
+    function isPlainTextTarget(node) {
+        if (!node || node.nodeType !== 1) return false;
+        var t = node.tagName;
+        if (hasEditableAncestor(node)) return false;
+        if (hasDraggableAncestor(node)) return false;
+        if (t === 'A' || t === 'IMG' || t === 'CANVAS' || t === 'VIDEO' || t === 'IFRAME') return false;
+        var us = userSelectOf(node);
+        if (us === 'none') return false;
+        // Only engage when the target (or an ancestor) actually has
+        // selectable text.
+        var text = node.textContent || '';
+        return text.trim().length > 0;
+    }
+
+    var dragging = false;
+    var anchorEl = null, anchorOff = 0;
+
+    function pointInEl(el, x, y) {
+        var r = el.getBoundingClientRect();
+        return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    }
+
+    document.addEventListener('mousedown', function(e) {
+        if (e.button !== 0) return;
+        var el = elFromPoint(e.clientX, e.clientY);
+        if (!el) return;
+        if (hasDraggableAncestor(el) || hasEditableAncestor(el)) return;
+        if (!isPlainTextTarget(el)) return;
+        // Only take over when there is no existing selection to extend.
+        var sel = window.getSelection();
+        if (!sel.isCollapsed && sel.toString().length > 0) return;
+        dragging = true;
+        anchorEl = el;
+        try {
+            var r = document.caretRangeFromPoint(e.clientX, e.clientY);
+            if (r) { anchorEl = r.startContainer; anchorOff = r.startOffset; }
+        } catch (err) { }
+    }, true);
+
+    document.addEventListener('mousemove', function(e) {
+        if (!dragging) return;
+        var sel = window.getSelection();
+        if (!sel.isCollapsed && sel.toString().length > 0) {
+            // Native selection appeared (e.g. native drag path worked, or the
+            // page managed it) — stop interfering.
+            dragging = false;
+            return;
+        }
+        var el = elFromPoint(e.clientX, e.clientY);
+        if (!el || !pointInEl(el, e.clientX, e.clientY)) {
+            // The pointer is over the view's own UI or outside the document —
+            // don't extend the selection outside text content.
+            return;
+        }
+        // Do not extend selection into draggable/editable/input regions —
+        // dragging over them should keep their native behavior (drag, caret).
+        if (hasDraggableAncestor(el) || hasEditableAncestor(el)) return;
+        var r = document.caretRangeFromPoint(e.clientX, e.clientY);
+        if (!r) return;
+        try {
+            var range = document.createRange();
+            range.setStart(anchorEl, anchorOff);
+            range.setEnd(r.startContainer, r.startOffset);
+            sel.removeAllRanges();
+            sel.addRange(range);
+        } catch (err) { }
+    }, true);
+
+    document.addEventListener('mouseup', function(e) {
+        if (e.button !== 0) return;
+        dragging = false;
+    }, true);
+})();
+)JS";
+}  // namespace
+
+void DWPEView::injectDragSelectFallback()
+{
+    if (!m_webView)
+        return;
+    webkit_web_view_evaluate_javascript(m_webView, s_dragSelectFallbackScript, -1, nullptr, nullptr, nullptr, nullptr, nullptr);
+}
+
 void DWPEView::paintGL()
 {
     glViewport(
@@ -670,6 +804,10 @@ void DWPEView::onLoadChanged(WebKitWebView *webView, WebKitLoadEvent loadEvent, 
         // Re-inject the page background CSS (a new navigation replaces the
         // DOM, wiping the previously injected <style> element).
         view->injectPageBackgroundCss();
+        // Re-inject the drag-to-select JS fallback (a new navigation replaces
+        // the DOM, wiping the previously added listeners).
+        if (view->m_dragSelectEnabled)
+            view->injectDragSelectFallback();
         break;
     case WEBKIT_LOAD_FINISHED:
         // Reset crash retry counter on successful page load.

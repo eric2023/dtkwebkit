@@ -96,6 +96,7 @@ public:
     // Resize notification (WPE backend needs updated size)
     void setViewSize(int width, int height);
 
+
     // Set the background color for the web page content. Supports both
     // opaque (alpha=255) and semi-transparent (alpha<255) colors.
     // For semi-transparent backgrounds, the fragment shader multiplies
@@ -111,6 +112,28 @@ public:
     // text on a dark background). For external URLs, do NOT call this — it
     // would override the page's own background with !important.
     void setPageBackgroundColor(const QColor &color);
+    // Enable the built-in drag-to-select text fallback.
+    //
+    // The Debian wpewebkit 2.46.3 package is built with
+    // ENABLE_DRAG_SUPPORT=OFF (Source/cmake/WebKitFeatures.cmake), so the
+    // WebCore drag-selection code is compiled out: mouse-dragging over text
+    // never produces a selection (double-click still works, as it uses a
+    // different path). To make drag-selection usable, DWPEView injects a
+    // lightweight JS fallback that mirrors the mousedown/mousemove/mouseup
+    // gesture and extends window.getSelection() itself.
+    //
+    // The fallback only engages when the native selection is still empty and
+    // the drag target is plain non-editable text; it skips inputs,
+    // contenteditable regions, draggable elements, links and images, and
+    // respects the element's own user-select/-webkit-user-select. When WPE
+    // is built with DRAG_SUPPORT=ON the native path already handles dragging
+    // and the fallback stays out of the way.
+    //
+    // Enabled by default; call setDragSelectEnabled(false) to disable it
+    // (e.g. when the page manages its own selection).
+    void setDragSelectEnabled(bool enabled) { m_dragSelectEnabled = enabled; }
+    bool isDragSelectEnabled() const { return m_dragSelectEnabled; }
+
     QColor backgroundColor() const { return m_bgColor; }
 
 private:
@@ -118,6 +141,9 @@ private:
     // Called from setPageBackgroundColor and from the LOAD_COMMITTED
     // handler (a new navigation replaces the DOM).
     void injectPageBackgroundCss();
+    // Inject the drag-to-select JS fallback into the page's main world.
+    // Called from onLoadChanged (LOAD_COMMITTED) when m_dragSelectEnabled.
+    void injectDragSelectFallback();
 
     // --- DevTools / Inspector ---
     bool isDevToolsEnabled() const { return m_devToolsEnabled; }
@@ -193,6 +219,9 @@ private:
     GLuint m_vbo{0};
     GLint m_posAttr{0};
     GLint m_texCoordAttr{0};
+    // Drag-to-select JS fallback toggle (see setDragSelectEnabled).
+    bool m_dragSelectEnabled{true};
+
     GLint m_texUniform{0};
     GLint m_alphaUniform{0};
     GLint m_yFlipUniform{0};

@@ -62,15 +62,21 @@ public:
 private:
     ::wpe_view_backend *m_backend{nullptr};
 
-
     // Qt::Key -> Linux evdev keycode mapping
     static uint32_t qtKeyToLinuxKeyCode(int qtKey);
 
     // Track modifier state for xkb key code resolution
     uint32_t m_modifiers{0};
 
-    // xkb keymap handle (for proper key→text conversion)
+    // xkb keymap handle (for proper key->text conversion)
     struct wpe_input_xkb_context *m_xkbContext{nullptr};
+
+    // Currently-pressed mouse button (1=left, 2=right, 3=middle), used to
+    // populate the `button` field of WPE motion events. WebKit's text
+    // selection requires motion events to carry the pressed left button
+    // (see EventHandler::handleMouseDraggedEvent); without it, dragging
+    // over text never starts a selection.
+    uint32_t m_mousePressedButton{0};
 
     // Throttle mouse-move dispatches to avoid excessive repainting.
     uint32_t m_lastMouseMoveTime{0};
