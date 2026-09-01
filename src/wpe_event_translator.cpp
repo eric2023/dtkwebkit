@@ -192,6 +192,18 @@ void DWPEEventTranslator::translateMouseEvent(QMouseEvent *event)
     if (!m_backend)
         return;
 
+    // Suppress right-button (context menu) events: WPE's WebProcess queries
+    // the clipboard when building a context menu (to enable/disable "Paste"),
+    // but WPEBackend-FDO's pasteboard is not wired up.  The synchronous IPC
+    // deadlocks the GUI.  Swallowing the right-click here prevents the
+    // WebProcess from entering the context-menu code path entirely.
+    // The host application can implement its own context menu via Qt.
+    if (event->button() == Qt::RightButton
+        && (event->type() == QEvent::MouseButtonPress
+            || event->type() == QEvent::MouseButtonRelease
+            || event->type() == QEvent::MouseButtonDblClick))
+        return;
+
 
     m_pointerEvent.type = wpe_input_pointer_event_type_button;
     m_pointerEvent.time = static_cast<uint32_t>(event->timestamp());

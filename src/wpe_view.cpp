@@ -20,6 +20,8 @@
 #include <QOpenGLShaderProgram>
 #include <QInputMethodQueryEvent>
 #include <jsc/jsc.h>
+#include <QClipboard>
+#include <QGuiApplication>
 #include <glib.h>
 #include <QStandardPaths>
 // WebKitHitTestResult.h is included transitively via <wpe/webkit.h>.
@@ -269,6 +271,13 @@ void DWPEView::initializeWPE(EGLDisplay eglDisplay)
     g_signal_connect(m_webView, "create", G_CALLBACK(onCreate), this);
     g_signal_connect(m_webView, "ready-to-show", G_CALLBACK(onReadyToShow), this);
     g_signal_connect(m_webView, "close", G_CALLBACK(onClose), this);
+    // Suppress the default context menu: WPE's built-in menu is a native
+    // popup that captures the pointer, breaking all subsequent mouse events
+    // (including drag-select).  The host application can still implement its
+    // own menu via the context-menu signal if needed.
+    g_signal_connect(m_webView, "context-menu", G_CALLBACK(+[](WebKitWebView *, WebKitContextMenu *, gpointer, WebKitHitTestResult *, gpointer) -> gboolean {
+        return TRUE;  // prevent default
+    }), nullptr);
     // Mark the view as visible, in-window, and focused so WPE starts
     // producing frames and accepting input. focusInEvent may not fire
     // when QOpenGLWindow is embedded in a QWidget container.
@@ -290,7 +299,16 @@ void DWPEView::initializeWPE(EGLDisplay eglDisplay)
     // export) never fire. Pump the GLib default context at 16ms intervals
     // (~60 FPS) so WPE frame delivery stays alive.
     QObject::connect(&m_glibPollTimer, &QTimer::timeout, []() {
-        g_main_context_iteration(g_main_context_default(), FALSE);
+        // Drain pending GLib sources without blocking.  Cap at a small
+        // number of iterations to prevent feedback loops — WPEBackend-FDO
+        // pasteboard queries (triggered e.g. by X11 selection events when
+        // the page has a text selection) can otherwise generate a new
+        // source for every iteration, creating a busy-loop that freezes
+        // the UI.
+        for (int i = 0; i < 4; ++i) {
+            if (!g_main_context_iteration(g_main_context_default(), FALSE))
+                break;
+        }
     });
     m_glibPollTimer.start(16);
 
@@ -408,13 +426,11 @@ const char *s_dragSelectFallbackScript = R"JS(
     window.__dtkwebkitDragSelect = true;
 
     function elFromPoint(x, y) {
-        if (document.elementFromPoint)
-            return document.elementFromPoint(x, y);
-        return null;
+        return document.elementFromPoint ? document.elementFromPoint(x, y) : null;
     }
 
     function userSelectOf(node) {
-        if (!node || !node.nodeType || node.nodeType !== 1) return '';
+        if (!node || node.nodeType !== 1) return '';
         var cs = window.getComputedStyle(node, null);
         return (cs && cs.userSelect) ? cs.userSelect :
                (cs && cs.webkitUserSelect) ? cs.webkitUserSelect : '';
@@ -433,8 +449,7 @@ const char *s_dragSelectFallbackScript = R"JS(
     function hasEditableAncestor(node) {
         var n = node;
         while (n && n.nodeType === 1) {
-            if (n.isContentEditable)
-                return true;
+            if (n.isContentEditable) return true;
             var t = n.tagName;
             if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT' || t === 'OPTION')
                 return true;
@@ -449,70 +464,61 @@ const char *s_dragSelectFallbackScript = R"JS(
         if (hasEditableAncestor(node)) return false;
         if (hasDraggableAncestor(node)) return false;
         if (t === 'A' || t === 'IMG' || t === 'CANVAS' || t === 'VIDEO' || t === 'IFRAME') return false;
-        var us = userSelectOf(node);
-        if (us === 'none') return false;
-        // Only engage when the target (or an ancestor) actually has
-        // selectable text.
+        if (userSelectOf(node) === 'none') return false;
         var text = node.textContent || '';
         return text.trim().length > 0;
     }
 
-    var dragging = false;
-    var anchorEl = null, anchorOff = 0;
-
-    function pointInEl(el, x, y) {
-        var r = el.getBoundingClientRect();
-        return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    // Returns {node, offset} for the caret position at (x,y), or null.
+    function caretAt(x, y) {
+        if (!document.caretRangeFromPoint) return null;
+        try {
+            var r = document.caretRangeFromPoint(x, y);
+            if (r) return { node: r.startContainer, offset: r.startOffset };
+        } catch (err) { }
+        return null;
     }
 
-    document.addEventListener('mousedown', function(e) {
-        if (e.button !== 0) return;
-        var el = elFromPoint(e.clientX, e.clientY);
-        if (!el) return;
-        if (hasDraggableAncestor(el) || hasEditableAncestor(el)) return;
-        if (!isPlainTextTarget(el)) return;
-        // Only take over when there is no existing selection to extend.
-        var sel = window.getSelection();
-        if (!sel.isCollapsed && sel.toString().length > 0) return;
-        dragging = true;
-        anchorEl = el;
-        try {
-            var r = document.caretRangeFromPoint(e.clientX, e.clientY);
-            if (r) { anchorEl = r.startContainer; anchorOff = r.startOffset; }
-        } catch (err) { }
-    }, true);
+    var dragging = false;
+    var anchorNode = null, anchorOff = 0;
 
-    document.addEventListener('mousemove', function(e) {
-        if (!dragging) return;
-        var sel = window.getSelection();
-        if (!sel.isCollapsed && sel.toString().length > 0) {
-            // Native selection appeared (e.g. native drag path worked, or the
-            // page managed it) — stop interfering.
+    document.addEventListener('mousedown', function(e) {
+        // Any non-left button (right-click, middle) cancels an active drag.
+        if (e.button !== 0) {
             dragging = false;
             return;
         }
         var el = elFromPoint(e.clientX, e.clientY);
-        if (!el || !pointInEl(el, e.clientX, e.clientY)) {
-            // The pointer is over the view's own UI or outside the document —
-            // don't extend the selection outside text content.
-            return;
-        }
-        // Do not extend selection into draggable/editable/input regions —
-        // dragging over them should keep their native behavior (drag, caret).
+        if (!el) return;
         if (hasDraggableAncestor(el) || hasEditableAncestor(el)) return;
-        var r = document.caretRangeFromPoint(e.clientX, e.clientY);
-        if (!r) return;
+        if (!isPlainTextTarget(el)) return;
+        // Start a new drag selection.  Clear any existing selection first
+        // (native browsers do the same — dragging replaces the selection).
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        dragging = true;
+        var c = caretAt(e.clientX, e.clientY);
+        if (c) { anchorNode = c.node; anchorOff = c.offset; }
+        else   { anchorNode = el; anchorOff = 0; }
+    }, true);
+
+    document.addEventListener('mousemove', function(e) {
+        if (!dragging) return;
+        var el = elFromPoint(e.clientX, e.clientY);
+        if (!el) return;
+        if (hasDraggableAncestor(el) || hasEditableAncestor(el)) return;
+        var c = caretAt(e.clientX, e.clientY);
+        if (!c) return;
         try {
-            var range = document.createRange();
-            range.setStart(anchorEl, anchorOff);
-            range.setEnd(r.startContainer, r.startOffset);
-            sel.removeAllRanges();
-            sel.addRange(range);
+            // setBaseAndExtent handles both forward and backward drags
+            // (right-to-left, bottom-to-top) automatically.
+            var sel = window.getSelection();
+            sel.setBaseAndExtent(anchorNode, anchorOff, c.node, c.offset);
         } catch (err) { }
     }, true);
 
     document.addEventListener('mouseup', function(e) {
-        if (e.button !== 0) return;
+        // Any button release ends the drag (left, right, or middle).
         dragging = false;
     }, true);
 })();
@@ -884,6 +890,40 @@ void DWPEView::onMouseTargetChanged(WebKitWebView *webView, WebKitHitTestResult 
 
 void DWPEView::keyPressEvent(QKeyEvent *event)
 {
+    // Intercept Ctrl+C (Copy) to avoid a deadlock: the WPE WebProcess
+    // forwards clipboard requests back to the UI process via IPC, but
+    // WPEBackend-FDO's pasteboard is not wired up in this embedding.
+    // The synchronous IPC blocks the GLib main context, freezing the GUI.
+    // Instead, evaluate JS to retrieve the selected text and push it to
+    // Qt's clipboard directly.
+    if (event->key() == Qt::Key_C && (event->modifiers() & Qt::ControlModifier)) {
+        if (m_webView) {
+            auto *cb = QGuiApplication::clipboard();
+            // evaluate_javascript is async; use the finish callback to
+            // obtain the JSCValue and extract the string.
+            webkit_web_view_evaluate_javascript(
+                m_webView, "window.getSelection().toString()", -1,
+                nullptr, nullptr, nullptr,
+                [](GObject *obj, GAsyncResult *res, gpointer) {
+                    GError *err = nullptr;
+                    JSCValue *val = webkit_web_view_evaluate_javascript_finish(
+                        WEBKIT_WEB_VIEW(obj), res, &err);
+                    if (err) { g_error_free(err); return; }
+                    if (val && jsc_value_is_string(val)) {
+                        char *str = jsc_value_to_string(val);
+                        if (str) {
+                            QGuiApplication::clipboard()->setText(
+                                QString::fromUtf8(str));
+                            g_free(str);
+                        }
+                    }
+                    if (val) g_object_unref(val);
+                },
+                nullptr);
+        }
+        return;  // Don't forward to WPE
+    }
+
     m_eventTranslator->translateKeyEvent(event);
     QOpenGLWindow::keyPressEvent(event);
 }
@@ -896,12 +936,36 @@ void DWPEView::keyReleaseEvent(QKeyEvent *event)
 
 void DWPEView::mousePressEvent(QMouseEvent *event)
 {
+    // Swallow right-button entirely.  The translator already drops it, but
+    // we must also avoid calling the base class, which lets Qt deliver a
+    // contextMenuEvent to the container.
+    //
+    // Additionally, clear any active text selection via JS *before*
+    // returning.  When a selection exists, a right-click causes the X11
+    // server to query the selection owner (the WPE WebProcess via
+    // WPEBackend-FDO).  The pasteboard is not wired up, so the query
+    // triggers a wakeup storm that freezes the UI.  Clearing the
+    // selection first prevents the query.
+    if (event->button() == Qt::RightButton) {
+        if (m_webView) {
+            webkit_web_view_evaluate_javascript(
+                m_webView,
+                "window.getSelection ? window.getSelection().removeAllRanges() : 0",
+                -1, nullptr, nullptr, nullptr, nullptr, nullptr);
+        }
+        event->accept();
+        return;
+    }
     m_eventTranslator->translateMouseEvent(event);
     QOpenGLWindow::mousePressEvent(event);
 }
 
 void DWPEView::mouseReleaseEvent(QMouseEvent *event)
 {
+    if (event->button() == Qt::RightButton) {
+        event->accept();
+        return;
+    }
     m_eventTranslator->translateMouseEvent(event);
     QOpenGLWindow::mouseReleaseEvent(event);
 }
@@ -973,6 +1037,14 @@ bool DWPEView::event(QEvent *event)
         }
         if (queryEvent->queries() & Qt::ImHints)
             queryEvent->setValue(Qt::ImHints, QVariant(Qt::ImhNone));
+        return true;
+    }
+    if (event->type() == QEvent::ContextMenu) {
+        // Swallow context-menu events: Qt synthesizes these from
+        // right-button presses, and the QWindowContainer may forward
+        // them to the host widget.  Any context menu reaching the WPE
+        // layer triggers clipboard IPC that deadlocks.
+        event->accept();
         return true;
     }
     return QOpenGLWindow::event(event);
