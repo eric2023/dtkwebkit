@@ -11,11 +11,6 @@ target_compile_definitions(minibrowser PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(minibrowser
     PRIVATE
         dtkwebkit
-        Qt6::Core
-        Qt6::Gui
-        Qt6::OpenGL
-        Qt6::OpenGLWidgets
-        Qt6::Widgets
-        Dtk6::Core
-        Dtk6::Widget
+        ${QT_LIBRARIES}
+        ${DTK_LIBRARIES}
 )

@@ -9,10 +9,8 @@ target_compile_definitions(test_event_translator PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(test_event_translator
     PRIVATE
         dtkwebkit
-        Qt6::Core
-        Qt6::Gui
-        Qt6::Test
-        Qt6::Widgets
+        ${QT_LIBRARIES}
+        ${QT_TEST_LIBRARIES}
 )
 
 # Scheme handler unit test
@@ -24,10 +22,8 @@ target_compile_definitions(test_scheme_handler PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(test_scheme_handler
     PRIVATE
         dtkwebkit
-        Qt6::Core
-        Qt6::Gui
-        Qt6::Test
-        Qt6::Widgets
+        ${QT_LIBRARIES}
+        ${QT_TEST_LIBRARIES}
 )
 
 include(CTest)

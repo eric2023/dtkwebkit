@@ -1,3 +1,13 @@
+dtkwebkit (0.2.0-1) unstable; urgency=medium
+
+  * Support both Qt5 and Qt6 build environments.
+  * CMake auto-detects Qt version; override with -DQT_VERSION=5 or 6.
+  * Add qt_compat.h shim for QMouseEvent::position()/QVariant::typeId().
+  * DTK5 (DtkCore/DtkWidget) and DTK6 (Dtk6Core/Dtk6Widget) both supported.
+  * Debian control uses alternative build-depends for Qt5|Qt6 and DTK5|DTK6.
+
+ -- UnionTech Software Technology Co., Ltd.  <dev@uniontech.com>  Tue, 09 Sep 2026 00:00:00 +0800
+
 dtkwebkit (0.1.0-1) unstable; urgency=medium
 
   * Initial release.

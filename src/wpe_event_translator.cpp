@@ -10,6 +10,7 @@
 
 #include "wpe_export.h"
 #include "wpe_event_translator.h"
+#include "qt_compat.h"
 
 #include <QGuiApplication>
 
@@ -206,9 +207,8 @@ void DWPEEventTranslator::translateMouseEvent(QMouseEvent *event)
 
 
     m_pointerEvent.type = wpe_input_pointer_event_type_button;
-    m_pointerEvent.time = static_cast<uint32_t>(event->timestamp());
-    m_pointerEvent.x = static_cast<int>(event->position().x() / m_devicePixelRatio);
-    m_pointerEvent.y = static_cast<int>(event->position().y() / m_devicePixelRatio);
+    m_pointerEvent.x = static_cast<int>(DTKWPE::eventPos(event).x() / m_devicePixelRatio);
+    m_pointerEvent.y = static_cast<int>(DTKWPE::eventPos(event).y() / m_devicePixelRatio);
 
     // Button mapping
     if (event->type() == QEvent::MouseMove) {
@@ -268,8 +268,8 @@ void DWPEEventTranslator::translateWheelEvent(QWheelEvent *event)
 
     m_axisEvent.type = wpe_input_axis_event_type_motion;
     m_axisEvent.time = static_cast<uint32_t>(event->timestamp());
-    m_axisEvent.x = static_cast<int>(event->position().x() / m_devicePixelRatio);
-    m_axisEvent.y = static_cast<int>(event->position().y() / m_devicePixelRatio);
+    m_axisEvent.x = static_cast<int>(DTKWPE::eventPos(event).x() / m_devicePixelRatio);
+    m_axisEvent.y = static_cast<int>(DTKWPE::eventPos(event).y() / m_devicePixelRatio);
 
     // Pass keyboard modifiers so WebKit can detect Ctrl+wheel (zoom)
     // and Shift+wheel (horizontal scroll).

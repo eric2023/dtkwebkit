@@ -5,7 +5,7 @@ string(STRIP "${FILE_VERSION}" FILE_VERSION)
 
 project(dtkwebkit
     VERSION ${FILE_VERSION}
-    DESCRIPTION "WPE WebKit Qt6 embedding layer for UnionTech UOS"
+    DESCRIPTION "WPE WebKit Qt embedding layer for UnionTech UOS"
     HOMEPAGE_URL "https://github.com/linuxdeepin/dtkwebkit"
     LANGUAGES CXX C
 )
@@ -27,12 +27,48 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-# Qt6
-find_package(Qt6 COMPONENTS Core Gui OpenGL OpenGLWidgets Widgets Test REQUIRED)
+# --- Qt version selection (Qt5 or Qt6) ---
+# Set -DQT_VERSION=5 or -DQT_VERSION=6 to force a specific version.
+# If not set, auto-detect: prefer Qt6, fall back to Qt5.
+if(NOT DEFINED QT_VERSION)
+    find_package(Qt6 COMPONENTS Core QUIET)
+    if(Qt6_FOUND)
+        set(QT_VERSION 6)
+    else()
+        find_package(Qt5 COMPONENTS Core QUIET)
+        if(Qt5_FOUND)
+            set(QT_VERSION 5)
+        else()
+            message(FATAL_ERROR "Neither Qt5 nor Qt6 found. Set -DQT_VERSION=5 or -DQT_VERSION=6.")
+        endif()
+    endif()
+endif()
 
-# DTK6
-find_package(Dtk6Core REQUIRED)
-find_package(Dtk6Widget REQUIRED)
+if(QT_VERSION EQUAL 6)
+    # Qt6
+    find_package(Qt6 COMPONENTS Core Gui OpenGL OpenGLWidgets Widgets Test REQUIRED)
+    set(QT_LIBRARIES Qt6::Core Qt6::Gui Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Widgets)
+    set(QT_TEST_LIBRARIES Qt6::Test)
+
+    # DTK6
+    find_package(Dtk6Core REQUIRED)
+    find_package(Dtk6Widget REQUIRED)
+    set(DTK_LIBRARIES Dtk6::Core Dtk6::Widget)
+    set(DTK_FIND_DEPS "Dtk6Core" "Dtk6Widget")
+else()
+    # Qt5
+    find_package(Qt5 COMPONENTS Core Gui OpenGL Widgets Test REQUIRED)
+    set(QT_LIBRARIES Qt5::Core Qt5::Gui Qt5::OpenGL Qt5::Widgets)
+    set(QT_TEST_LIBRARIES Qt5::Test)
+
+    # DTK5
+    find_package(DtkCore REQUIRED)
+    find_package(DtkWidget REQUIRED)
+    set(DTK_LIBRARIES Dtk::Core Dtk::Widget)
+    set(DTK_FIND_DEPS "DtkCore" "DtkWidget")
+endif()
+
+message(STATUS "Building dtkwebkit with Qt${QT_VERSION}")
 
 # WPE WebKit + Backend-FDO (pkg-config)
 # Target: wpe-webkit-2.0 >= 2.50 (per spec V3.1 §9.3)
@@ -80,14 +116,8 @@ target_compile_definitions(dtkwebkit PRIVATE QT_NO_KEYWORDS)
 
 target_link_libraries(dtkwebkit
     PUBLIC
-        Qt6::Core
-        Qt6::Gui
-        Qt6::OpenGL
-        Qt6::OpenGLWidgets
-        Qt6::Widgets
-        Dtk6::Core
-        Dtk6::Widget
-    PUBLIC
+        ${QT_LIBRARIES}
+        ${DTK_LIBRARIES}
         PkgConfig::WPE
         PkgConfig::EGL
         PkgConfig::GLES2

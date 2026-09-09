@@ -1,6 +1,6 @@
 # dtkwebkit
 
-WPE WebKit Qt6 自研嵌入层 — 在 Qt6 宿主中直渲 WPE WebKit，替代 Qt WebEngine。
+WPE WebKit Qt 自研嵌入层 — 在 Qt5/Qt6 宿主中直渲 WPE WebKit，替代 Qt WebEngine。
 
 面向信创操作系统（UOS），零 GTK / Qt WebEngine / CEF 依赖，保留 Vue3/Vite/npm/DevTools 上游生态。
 
@@ -8,7 +8,7 @@ WPE WebKit Qt6 自研嵌入层 — 在 Qt6 宿主中直渲 WPE WebKit，替代 Q
 
 | 维度 | 说明 |
 |------|------|
-| 宿主环境 | 信创 UOS，Qt6 主壳 |
+| 宿主环境 | 信创 UOS，Qt5/Qt6 主壳（自动检测，`-DQT_VERSION=5` 或 `6` 指定） |
 | 替换目标 | Qt WebEngine（Chromium ~3500 万行） |
 | 自研率提升 | 分母剔除 Chromium + GTK+Cairo，分子计入自研桥接层 3k~7k 行 C++ |
 | 前端兼容 | Vue3 SPA（164 tsx + 29 Pinia store + 12 QWebChannel 通道）零修改运行 |
@@ -21,7 +21,7 @@ WPE WebKit Qt6 自研嵌入层 — 在 Qt6 宿主中直渲 WPE WebKit，替代 Q
 │  ├─ 12 个 QWebChannel 通道 → window.host 适配层      │
 │  └─ 流式渲染 / Markdown / Milkdown / 拖拽上传 ...   │
 ├────────────────────────────────────────────────────┤
-│  宿主层：Qt6 Widgets 主壳 + DTK 重绘控件              │
+│  宿主层：Qt5/Qt6 Widgets 主壳 + DTK 重绘控件           │
 │  └─ WebSurface 抽象接口（Facade）                    │
 ├────────────────────────────────────────────────────┤
 │  桥接层（自研，本仓库）                               │
@@ -53,8 +53,8 @@ WPE WebKit Qt6 自研嵌入层 — 在 Qt6 宿主中直渲 WPE WebKit，替代 Q
 
 | 依赖 | 最低版本 | 说明 |
 |------|---------|------|
-| Qt6 (Core/Gui/OpenGL/OpenGLWidgets/Widgets/Test) | 6.5 | 宿主 GUI 框架 |
-| DTK6 (Dtk6Core/Dtk6Widget) | 6.0 | DTK 重绘控件 |
+| Qt5 或 Qt6 (Core/Gui/OpenGL/[OpenGLWidgets/]Widgets/Test) | 5.11 / 6.5 | 宿主 GUI 框架（`-DQT_VERSION=5` 或 `6` 指定，自动检测） |
+| DTK5 (DtkCore/DtkWidget) 或 DTK6 (Dtk6Core/Dtk6Widget) | 5.6 / 6.0 | DTK 重绘控件（对应 Qt 版本） |
 | WPE WebKit | 2.46 | Web 渲染引擎（目标 2.50+） |
 | libwpe | 1.16 | WPE 平台抽象 |
 | WPEBackend-FDO | 1.12 | EGL exportable 后端 |
@@ -66,8 +66,11 @@ WPE WebKit Qt6 自研嵌入层 — 在 Qt6 宿主中直渲 WPE WebKit，替代 Q
 
 ```bash
 cd dtkwebkit
-mkdir -p build && cd build
+
+# 自动检测 Qt 版本（优先 Qt6，回退 Qt5）
 cmake .. -DCMAKE_BUILD_TYPE=Debug
+# 或显式指定：cmake .. -DQT_VERSION=5
+
 make -j$(nproc)
 ```
 

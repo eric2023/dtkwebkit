@@ -13,6 +13,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include "qt_compat.h"
 
 #include <wpe/webkit.h>
 #include <jsc/jsc.h>
@@ -231,7 +232,7 @@ gboolean DWPEBridge::onScriptMessageReceived(WebKitUserContentManager *ucm,
         JSCContext *context = jsc_value_get_context(value);
         if (result.isValid()) {
             QByteArray replyJson;
-            if (result.typeId() == QMetaType::QString) {
+            if (DTKWPE::variantTypeId(result) == QMetaType::QString) {
                 // QJsonDocument::fromVariant can't serialize a bare QString.
                 // Wrap in a one-element array, serialize, strip the brackets:
                 // ["Hello"] → "Hello" (valid JSON string literal for JSON.parse).

@@ -41,7 +41,10 @@ CI 在 PR 检查中运行 `clang-format --dry-run --Werror --style=file`。
 - `cmake_minimum_required(VERSION 3.13)`
 - 从 `VERSION` 文件读取版本号：`file(READ VERSION FILE_VERSION)` → `project(VERSION ${FILE_VERSION})`
 - 默认安装前缀 `/usr`（DTK 标准）
-- 依赖通过 `find_package`（Qt6/DTK6）和 `pkg_check_modules`（WPE/EGL/GStreamer/GLib）声明
+- **Qt5/Qt6 双版本支持**：通过 `-DQT_VERSION=5` 或 `-DQT_VERSION=6` 指定，未指定时自动检测（优先 Qt6）
+- Qt6 依赖：`find_package(Qt6 COMPONENTS Core Gui OpenGL OpenGLWidgets Widgets)` + `Dtk6Core` / `Dtk6Widget`
+- Qt5 依赖：`find_package(Qt5 COMPONENTS Core Gui OpenGL Widgets)` + `DtkCore` / `DtkWidget`
+- WPE/EGL/GStreamer/GLib 依赖通过 `pkg_check_modules` 声明（两版本通用）
 - 生成 CMake Config 文件供下游使用
 
 ## 4. 仓库结构

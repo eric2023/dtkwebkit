@@ -10,7 +10,7 @@
 
 ### 1.1 定位
 
-dtkwebkit 是 **WPE WebKit Qt6 自研嵌入层**：在 Qt6 宿主窗口中直渲 WPE WebKit 合成帧，替代 Qt WebEngine（Chromium）。
+dtkwebkit 是 **WPE WebKit Qt 自研嵌入层**：在 Qt5/Qt6 宿主窗口中直渲 WPE WebKit 合成帧，替代 Qt WebEngine（Chromium）。
 
 - 面向信创操作系统（UOS），零 GTK / Qt WebEngine / CEF 依赖
 - 保留 Vue3/Vite/npm/DevTools 上游前端生态
@@ -27,6 +27,7 @@ dtkwebkit 是 **WPE WebKit Qt6 自研嵌入层**：在 Qt6 宿主窗口中直渲
 | `QT_NO_KEYWORDS` 全局定义 | GLib `signals` 成员名与 Qt `#define signals` 冲突 |
 | GLES2 shader 管线（非固定管线） | GLES 2.0 不含 glBegin/glEnd，必须用可编程管线 |
 | GLib 主循环 pump 定时器（16ms） | Qt 事件循环不调度 GLib default context，WPE 帧投递依赖 GLib GSource |
+| Qt5/Qt6 双版本兼容 | CMake 自动检测 Qt 版本，`qt_compat.h` 屏蔽 API 差异，UOS V20(Qt5) / V25(Qt6) 通用 |
 
 ---
 
@@ -306,7 +307,7 @@ dtkwebkit/
 │   ├── wpe_scheme_handler.h/.cpp
 │   ├── wpe_bridge.h/.cpp
 │   ├── wpe_channel_adapter.h/.cpp
-│   └── wpe_input_method_context.h/.cpp
+│   ├── qt_compat.h            # Qt5/Qt6 兼容层
 ├── tests/                     # Qt Test 单元测试
 │   ├── CMakeLists.txt
 │   ├── test_event_translator.cpp
@@ -330,8 +331,8 @@ dtkwebkit/
 |------|---------|------|
 | CMake | 3.13 | 构建系统 |
 | C++17 编译器 | GCC 8+ | 语言标准 |
-| Qt6 (Core/Gui/OpenGL/OpenGLWidgets/Widgets/Test) | 6.5 | 宿主 GUI 框架 |
-| DTK6 (Dtk6Core/Dtk6Widget) | 6.0 | DTK 重绘控件 |
+| Qt5 (Core/Gui/OpenGL/Widgets/Test) 或 Qt6 (Core/Gui/OpenGL/OpenGLWidgets/Widgets/Test) | 5.11 / 6.5 | 宿主 GUI 框架（自动检测，`-DQT_VERSION=5` 或 `6` 指定） |
+| DTK5 (DtkCore/DtkWidget) 或 DTK6 (Dtk6Core/Dtk6Widget) | 5.6 / 6.0 | DTK 重绘控件（对应 Qt 版本） |
 | WPE WebKit | 2.46 | Web 渲染引擎（目标 2.50+） |
 | libwpe | 1.16 | WPE 平台抽象 |
 | WPEBackend-FDO | 1.12 | EGL exportable 后端 |
@@ -356,7 +357,14 @@ dtkwebkit/
 ```bash
 cd dtkwebkit
 mkdir -p build && cd build
+
+# 自动检测 Qt 版本（优先 Qt6，回退 Qt5）
 cmake .. -DCMAKE_BUILD_TYPE=Debug
+
+# 或显式指定 Qt 版本
+cmake .. -DCMAKE_BUILD_TYPE=Debug -DQT_VERSION=5  # 强制 Qt5
+cmake .. -DCMAKE_BUILD_TYPE=Debug -DQT_VERSION=6  # 强制 Qt6
+
 make -j$(nproc)
 ```
 
@@ -366,9 +374,9 @@ make -j$(nproc)
 |------|--------|------|
 | `CMAKE_INSTALL_PREFIX` | `/usr` | DTK 标准 |
 | `CMAKE_BUILD_TYPE` | — | Debug/Release |
+| `QT_VERSION` | 自动检测 | `5` 或 `6`，未指定时优先 Qt6 回退 Qt5 |
 | `FETCHCONTENT_FULLY_DISCONNECTED` | ON | 禁止网络下载 |
-
-CMake 通过 `find_package` 声明 Qt6/DTK6 依赖，通过 `pkg_check_modules` 声明 WPE/EGL/GLES/GStreamer/GLib 依赖。
+CMake 通过 `find_package` 声明 Qt/DTK 依赖（Qt5→`Qt5`/`DtkCore`/`DtkWidget`，Qt6→`Qt6`/`Dtk6Core`/`Dtk6Widget`），通过 `pkg_check_modules` 声明 WPE/EGL/GLES/GStreamer/GLib 依赖。
 
 ### 6.3 编译目标
 
@@ -604,6 +612,7 @@ Web Inspector 端口配置、WPE 缓存路径须走标准路径，不硬编码�
 8. **bridge 注入**：注入到 main world（非 isolated world），在 LOAD_COMMITTED 时注入
 9. **事件转换参考**：以 WPEPlatform GLFW 示例（Igalia）为唯一参考，不得自行发明映射
 10. **沙箱参数**：bwrap/seccomp 参数由人工锁定，AI 不得修改
+11. **Qt5/Qt6 兼容**：源码必须同时兼容 Qt5 和 Qt6，版本差异通过 `src/qt_compat.h` 屏蔽；禁止直接调用 `QMouseEvent::position()`、`QVariant::typeId()` 等 Qt6 专属 API，必须使用 `DTKWPE::eventPos()` / `DTKWPE::variantTypeId()` 兼容包装
 
 ---
 
