@@ -130,9 +130,13 @@ LGPL-3.0-or-later，与 dtkcore/dtkwidget 一致。
 - `.reuse/dep5` — 版权归属声明
 - 每个源文件包含 `SPDX-License-Identifier: LGPL-3.0-or-later`
 
-## 开发规范
+## 开发文档
 
-详见 [docs/Specification.md](docs/Specification.md)。
+- [开发规范](docs/Specification.md) — 命名、代码风格、构建、提交、许可证规范
+- [开发指南](docs/DEVELOPMENT.md) — 架构、模块详解、API、构建测试、技术约束
+- [技术方案 V3.1](docs/WebKit_Qt6_自研嵌入层_方案_v3.md) — 完整技术方案与里程碑
+
+要点：
 
 - 命名：类名 PascalCase（`DWPEView`）、信号 snake_case 带 on 前缀（`onLoadFinished`）、文件名全小写下划线分词
 - 代码风格：`.clang-format` 同 dtkcore（IndentWidth=4, ColumnLimit=130, PointerAlignment=Right）

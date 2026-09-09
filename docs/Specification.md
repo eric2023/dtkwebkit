@@ -12,6 +12,9 @@
 | DTK D 前缀宏 | 大写 D 开头 | `DWIDGET_USE_NAMESPACE`、`DStyle` |
 | 命名空间 | 小写，对应模块名 | `DTKWPE`（桥接层命名空间） |
 | 文件名 | 全小写，下划线分词 | `wpe_view.h`、`web_surface.cpp` |
+| 成员变量 | m_ 前缀 + camelCase | `m_webView`、`m_currentImage` |
+| 常量 | k 前缀 + PascalCase | `kMaxCrashRetries`、`kMouseMoveThrottleMs` |
+| 静态变量 | s_ 前缀 + camelCase | `s_keyMap`、`s_vertSrc` |
 
 ## 2. 代码风格
 
@@ -46,21 +49,44 @@ CI 在 PR 检查中运行 `clang-format --dry-run --Werror --style=file`。
 ```
 dtkwebkit/
 ├── .clang-format
-├── .clog.toml
-├── .commitlintrc.json
-├── .github/workflows/ci.yml
+├── .gitignore
 ├── .reuse/dep5
 ├── CMakeLists.txt
 ├── VERSION
 ├── LICENSE
 ├── LICENSES/
+│   └── LGPL-3.0-or-later.txt
+├── cmake/
+│   └── dtkwebkit-config.cmake.in
 ├── debian/
+│   ├── changelog
+│   ├── control
+│   ├── copyright
+│   ├── rules
+│   ├── libdtkwebkit0.install
+│   └── libdtkwebkit-dev.install
 ├── docs/
-│   └── Specification.md
+│   ├── Specification.md
+│   ├── DEVELOPMENT.md
+│   └── WebKit_Qt6_自研嵌入层_方案_v3.md
 ├── include/dtkwebkit/
+│   ├── web_surface.h
+│   └── wpe_export.h
 ├── src/
+│   ├── wpe_view.h/.cpp
+│   ├── wpe_event_translator.h/.cpp
+│   ├── wpe_scheme_handler.h/.cpp
+│   ├── wpe_bridge.h/.cpp
+│   ├── wpe_channel_adapter.h/.cpp
+│   └── wpe_input_method_context.h/.cpp
 ├── tests/
+│   ├── CMakeLists.txt
+│   ├── test_event_translator.cpp
+│   └── test_scheme_handler.cpp
 └── examples/minibrowser/
+    ├── CMakeLists.txt
+    ├── main.cpp
+    └── dist/
 ```
 
 ## 5. 提交规范（Conventional Commits）
