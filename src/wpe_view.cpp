@@ -428,6 +428,44 @@ const char *s_dragSelectFallbackScript = R"JS(
     function elFromPoint(x, y) {
         return document.elementFromPoint ? document.elementFromPoint(x, y) : null;
     }
+    // Find an INPUT/TEXTAREA at the given point by checking all elements
+    // at that point (document.elementsFromPoint returns them in front-to-back
+    // order).  This handles cases where a wrapper div sits on top of the
+    // input but elementFromPoint returns the wrapper instead of the input.
+    function inputFromPoint(x, y) {
+        if (!document.elementsFromPoint) return null;
+        var els = document.elementsFromPoint(x, y);
+        for (var i = 0; i < els.length; i++) {
+            var t = els[i].tagName;
+            if (t === 'INPUT' || t === 'TEXTAREA') return els[i];
+            if (els[i].isContentEditable) return els[i];
+        }
+        return null;
+    }
+    // Fallback: scan all INPUT/TEXTAREA elements and return the first one
+    // whose bounding rect contains (x, y).  This handles cases where
+    // elementsFromPoint doesn't include the input (e.g. shadow DOM,
+    // overlay elements with pointer-events:none, or z-index stacking).
+    function visibleInputAt(x, y) {
+        var els = document.querySelectorAll('input, textarea');
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            var t = el.tagName;
+            if (t !== 'INPUT' && t !== 'TEXTAREA') continue;
+            if (t === 'INPUT') {
+                var ty = el.type;
+                if (ty && ty !== 'text' && ty !== 'search' && ty !== 'url'
+                    && ty !== 'email' && ty !== 'tel' && ty !== 'password')
+                    continue;
+            }
+            try {
+                var r = el.getBoundingClientRect();
+                if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom)
+                    return el;
+            } catch (err) { }
+        }
+        return null;
+    }
 
     function userSelectOf(node) {
         if (!node || node.nodeType !== 1) return '';
@@ -444,6 +482,18 @@ const char *s_dragSelectFallbackScript = R"JS(
             n = n.parentNode;
         }
         return false;
+    }
+
+    // Find the nearest INPUT or TEXTAREA ancestor (if any).
+    function editableInputOf(node) {
+        var n = node;
+        while (n && n.nodeType === 1) {
+            var t = n.tagName;
+            if (t === 'INPUT' || t === 'TEXTAREA') return n;
+            if (n.isContentEditable) return n;
+            n = n.parentNode;
+        }
+        return null;
     }
 
     function hasEditableAncestor(node) {
@@ -469,6 +519,7 @@ const char *s_dragSelectFallbackScript = R"JS(
         return text.trim().length > 0;
     }
 
+
     // Returns {node, offset} for the caret position at (x,y), or null.
     function caretAt(x, y) {
         if (!document.caretRangeFromPoint) return null;
@@ -479,24 +530,116 @@ const char *s_dragSelectFallbackScript = R"JS(
         return null;
     }
 
+    // Approximate the character offset at (x,y) inside an INPUT or TEXTAREA.
+    // We use a canvas-measure-text approach because caretRangeFromPoint does
+    // not always return a usable offset for form controls in WPE.
+    function caretOffsetInInput(inp, x, y) {
+        var t = inp.value || '';
+        if (!t) return 0;
+        // Get the input's screen rect.
+        var rect = inp.getBoundingClientRect();
+        // Local X relative to the input's content area.
+        var cs = window.getComputedStyle(inp, null);
+        var pl = parseInt(cs.paddingLeft) || 0;
+        var bl = parseInt(cs.borderLeftWidth) || 0;
+        var localX = x - (rect.left + pl + bl);
+        // For TEXTAREA, also account for vertical scrolling / line height.
+        var fs = parseInt(cs.fontSize) || 16;
+        var lh = parseInt(cs.lineHeight) || fs * 1.2;
+        var pt = parseInt(cs.paddingTop) || 0;
+        var bt = parseInt(cs.borderTopWidth) || 0;
+        var localY = y - (rect.top + pt + bt);
+        var scrollTop = inp.scrollTop || 0;
+        var lineIndex = Math.max(0, Math.floor((localY + scrollTop) / lh));
+
+        // Measure character widths with a canvas.
+        var ctx;
+        try {
+            ctx = document.createElement('canvas').getContext('2d');
+            ctx.font = cs.fontStyle + ' ' + cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+        } catch (err) { ctx = null; }
+
+        if (inp.tagName === 'TEXTAREA') {
+            // Split into lines, find which line, then find offset within.
+            var lines = t.split('\n');
+            var charOffset = 0;
+            for (var i = 0; i < lineIndex && i < lines.length; i++) {
+                charOffset += lines[i].length + 1; // +1 for the \n
+            }
+            var lineText = lines[Math.min(lineIndex, lines.length - 1)] || '';
+            return charOffset + measureTextOffset(ctx, lineText, localX);
+        }
+
+        // INPUT (single line): measure against the full value.
+        return measureTextOffset(ctx, t, localX);
+    }
+
+    // Binary-search for the character offset whose text width is closest to x.
+    function measureTextOffset(ctx, text, x) {
+        if (!text) return 0;
+        // Fast path: measure whole string.
+        function width(s) {
+            if (ctx) return ctx.measureText(s).width;
+            // Fallback: approximate at ~0.6 * fontSize per char.
+            return s.length * 8;
+        }
+        var lo = 0, hi = text.length;
+        while (lo < hi) {
+            var mid = (lo + hi + 1) >> 1;
+            if (width(text.substring(0, mid)) <= x) lo = mid;
+            else hi = mid - 1;
+        }
+        // lo is the largest prefix whose width <= x.  Check if lo+1 is closer.
+        if (lo < text.length) {
+            var wLo = width(text.substring(0, lo));
+            var wNext = width(text.substring(0, lo + 1));
+            if (Math.abs(wNext - x) < Math.abs(wLo - x)) lo = lo + 1;
+        }
+        return lo;
+    }
+
     var dragging = false;
     var anchorNode = null, anchorOff = 0;
+    var dragInput = null, dragInputOff = 0;  // INPUT/TEXTAREA being dragged
 
     document.addEventListener('mousedown', function(e) {
         // Any non-left button (right-click, middle) cancels an active drag.
         if (e.button !== 0) {
             dragging = false;
+            dragInput = null;
             return;
         }
-        var el = elFromPoint(e.clientX, e.clientY);
-        if (!el) return;
-        if (hasDraggableAncestor(el) || hasEditableAncestor(el)) return;
+        // --- INPUT / TEXTAREA / contentEditable ---
+        // Check __dtkLastInput first — on pages like Baidu, elementFromPoint
+        // and elementsFromPoint can't find the input (overlays, shadow DOM).
+        var li = window.__dtkLastInput;
+        if (li && document.contains && !document.contains(li))
+            li = null;  // stale reference after navigation
+        var inp = li;
+        if (!inp) {
+            var el = elFromPoint(e.clientX, e.clientY);
+            if (!el) return;
+            if (hasDraggableAncestor(el)) return;
+            inp = editableInputOf(el) || editableInputOf(e.target) || inputFromPoint(e.clientX, e.clientY) || visibleInputAt(e.clientX, e.clientY);
+        }
+        if (inp) {
+            dragging = true;
+            dragInput = inp;
+            window.__dtkLastInput = inp;
+            // Ensure the input has focus so setSelectionRange is visible.
+            try { inp.focus(); } catch (err) { }
+            // Record caret offset at mousedown as the anchor.
+            dragInputOff = caretOffsetInInput(inp, e.clientX, e.clientY);
+            return;
+        }
+
+        // --- Plain text (non-editable) ---
         if (!isPlainTextTarget(el)) return;
-        // Start a new drag selection.  Clear any existing selection first
-        // (native browsers do the same — dragging replaces the selection).
+        // Clear any existing selection (dragging replaces the selection).
         var sel = window.getSelection();
         sel.removeAllRanges();
         dragging = true;
+        dragInput = null;
         var c = caretAt(e.clientX, e.clientY);
         if (c) { anchorNode = c.node; anchorOff = c.offset; }
         else   { anchorNode = el; anchorOff = 0; }
@@ -504,6 +647,25 @@ const char *s_dragSelectFallbackScript = R"JS(
 
     document.addEventListener('mousemove', function(e) {
         if (!dragging) return;
+
+        // --- INPUT / TEXTAREA / contentEditable ---
+        if (dragInput) {
+            try {
+                var end = caretOffsetInInput(dragInput, e.clientX, e.clientY);
+                if (end < 0) return;
+                var lo = Math.min(dragInputOff, end);
+                var hi = Math.max(dragInputOff, end);
+                // Set __dtkLastInput and __dtkSelText BEFORE setSelectionRange,
+                // because setSelectionRange may synchronously fire selectionchange.
+                window.__dtkLastInput = dragInput;
+                window.__dtkSelText = dragInput.value.substring(lo, hi);
+                if (typeof dragInput.setSelectionRange === 'function')
+                    dragInput.setSelectionRange(lo, hi);
+            } catch (err) { }
+            return;
+        }
+
+        // --- Plain text ---
         var el = elFromPoint(e.clientX, e.clientY);
         if (!el) return;
         if (hasDraggableAncestor(el) || hasEditableAncestor(el)) return;
@@ -519,7 +681,108 @@ const char *s_dragSelectFallbackScript = R"JS(
 
     document.addEventListener('mouseup', function(e) {
         // Any button release ends the drag (left, right, or middle).
+        var wasInputDrag = !!dragInput;
+        var savedInput = dragInput;
+        var savedLo = 0, savedHi = 0;
+        if (wasInputDrag && typeof savedInput.selectionStart === 'number') {
+            savedLo = savedInput.selectionStart;
+            savedHi = savedInput.selectionEnd;
+        }
         dragging = false;
+        dragInput = null;
+        // WPE's native mouseup handler clears input selections.
+        // Re-apply the selection asynchronously after WPE's handler runs.
+        if (wasInputDrag && savedInput && savedHi > savedLo) {
+            // Stop propagation to prevent WPE from clearing the selection.
+            e.stopPropagation();
+            // Re-apply in case it was already cleared.
+            setTimeout(function() {
+                try {
+                    if (typeof savedInput.setSelectionRange === 'function')
+                        savedInput.setSelectionRange(savedLo, savedHi);
+                } catch (err) { }
+            }, 0);
+        }
+    }, true);
+    // Track the last INPUT/TEXTAREA that received a keyup or mousedown.
+    // WPE's internal focus may differ from document.activeElement, so we
+    // can't rely on activeElement to find the focused input.
+    window.__dtkLastInput = null;
+    document.addEventListener('keyup', function(e) {
+        var inp = editableInputOf(e.target) || editableInputOf(document.activeElement);
+        // Only use the fallback scan if __dtkLastInput is null or stale.
+        if (!inp) {
+            var cur = window.__dtkLastInput;
+            if (cur && document.contains && document.contains(cur))
+                return;  // keep existing valid reference
+            // WPE's e.target for keyup may be BODY even when an input has
+            // focus.  Fall back to scanning visible text-like inputs.
+            var els = document.querySelectorAll('input, textarea');
+            for (var i = 0; i < els.length; i++) {
+                var el = els[i];
+                var t = el.tagName;
+                if (t === 'INPUT') {
+                    var ty = el.type;
+                    if (ty && ty !== 'text' && ty !== 'search' && ty !== 'url'
+                        && ty !== 'email' && ty !== 'tel' && ty !== 'password')
+                        continue;
+                }
+                // Skip hidden inputs.
+                if (el.offsetParent === null && el.offsetWidth === 0)
+                    continue;
+                inp = el;
+                break;
+            }
+        }
+        if (inp) window.__dtkLastInput = inp;
+    }, true);
+    document.addEventListener('mousedown', function(e) {
+        var cur = window.__dtkLastInput;
+        if (cur && document.contains && !document.contains(cur))
+            window.__dtkLastInput = null;  // clear stale reference
+        // Don't override if already set to a valid input.
+        cur = window.__dtkLastInput;
+        if (cur && document.contains && document.contains(cur))
+            return;
+        var inp = editableInputOf(e.target) || inputFromPoint(e.clientX, e.clientY) || visibleInputAt(e.clientX, e.clientY);
+        if (inp) window.__dtkLastInput = inp;
+    }, true);
+    // Track the current selection text so the Ctrl+C handler can retrieve it
+    // even if the selection has been cleared by page JS by the time the async
+    // evaluate_javascript callback runs.
+    window.__dtkSelText = '';
+    function updateSelText() {
+        // Prioritize INPUT/TEXTAREA selections over page selections.
+        var a = document.activeElement;
+        if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')
+            && typeof a.selectionStart === 'number'
+            && a.selectionStart !== a.selectionEnd) {
+            window.__dtkSelText = a.value.substring(a.selectionStart, a.selectionEnd);
+            return;
+        }
+        var li = window.__dtkLastInput;
+        if (li && document.contains && !document.contains(li))
+            li = null;  // stale, but don't clear window.__dtkLastInput
+        if (li && li !== a && typeof li.selectionStart === 'number'
+            && li.selectionStart !== li.selectionEnd) {
+            window.__dtkSelText = li.value.substring(li.selectionStart, li.selectionEnd);
+            return;
+        }
+        // Fall back to window.getSelection (plain text).
+        // Skip this fallback when __dtkLastInput exists (even if stale) —
+        // the drag-select handler already set __dtkSelText with the input text.
+        if (window.__dtkLastInput) return;
+        var s = window.getSelection();
+        var t = s ? s.toString() : '';
+        if (t) window.__dtkSelText = t;
+    }
+    document.addEventListener('selectionchange', updateSelText);
+    // INPUT/TEXTAREA selection changes don't always fire document selectionchange.
+    // Also listen for select, keyup, and mouseup on inputs.
+    document.addEventListener('select', updateSelText, true);
+    document.addEventListener('keyup', function(e) {
+        if (e.target && editableInputOf(e.target))
+            updateSelText();
     }, true);
 })();
 )JS";
@@ -890,6 +1153,56 @@ void DWPEView::onMouseTargetChanged(WebKitWebView *webView, WebKitHitTestResult 
 
 void DWPEView::keyPressEvent(QKeyEvent *event)
 {
+    // Intercept Ctrl+A (Select All).  Forward to WPE for normal page-level
+    // INPUT/TEXTAREA.  On some pages WPE's Ctrl+A selects the whole page
+    // body instead of the focused input's text; the JS ensures the input's
+    // selection is set so the Ctrl+C handler can retrieve it.
+    if (event->key() == Qt::Key_A && (event->modifiers() & Qt::ControlModifier)) {
+        m_eventTranslator->translateKeyEvent(event);
+        QOpenGLWindow::keyPressEvent(event);
+        if (m_webView) {
+            static const char *s_selectAllScript = R"JS(
+                (function() {
+                    function findTextInput() {
+                        var li = window.__dtkLastInput;
+                        if (li && document.contains && !document.contains(li))
+                            li = null;
+                        if (li && (li.tagName === 'INPUT' || li.tagName === 'TEXTAREA'))
+                            return li;
+                        var a = document.activeElement;
+                        if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA'))
+                            return a;
+                        // Scan for first visible text-like input.
+                        var els = document.querySelectorAll('input, textarea');
+                        for (var i = 0; i < els.length; i++) {
+                            var el = els[i];
+                            if (el.tagName === 'INPUT') {
+                                var ty = el.type;
+                                if (ty && ty !== 'text' && ty !== 'search'
+                                    && ty !== 'url' && ty !== 'email'
+                                    && ty !== 'tel' && ty !== 'password')
+                                    continue;
+                            }
+                            if (el.offsetParent === null && el.offsetWidth === 0)
+                                continue;
+                            return el;
+                        }
+                        return null;
+                    }
+                    var inp = findTextInput();
+                    if (inp) {
+                        window.__dtkLastInput = inp;
+                        if (typeof inp.select === 'function')
+                            inp.select();
+                    }
+                })()
+            )JS";
+            webkit_web_view_evaluate_javascript(
+                m_webView, s_selectAllScript, -1,
+                nullptr, nullptr, nullptr, nullptr, nullptr);
+        }
+        return;
+    }
     // Intercept Ctrl+C (Copy) to avoid a deadlock: the WPE WebProcess
     // forwards clipboard requests back to the UI process via IPC, but
     // WPEBackend-FDO's pasteboard is not wired up in this embedding.
@@ -898,17 +1211,61 @@ void DWPEView::keyPressEvent(QKeyEvent *event)
     // Qt's clipboard directly.
     if (event->key() == Qt::Key_C && (event->modifiers() & Qt::ControlModifier)) {
         if (m_webView) {
-            auto *cb = QGuiApplication::clipboard();
-            // evaluate_javascript is async; use the finish callback to
-            // obtain the JSCValue and extract the string.
+            static const char *s_copyScript = R"JS(
+                (function() {
+                    function findTextInput() {
+                        var a = document.activeElement;
+                        if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')
+                            && typeof a.selectionStart === 'number')
+                            return a;
+                        var li = window.__dtkLastInput;
+                        if (li && document.contains && !document.contains(li))
+                            li = null;
+                        if (li && (li.tagName === 'INPUT' || li.tagName === 'TEXTAREA'))
+                            return li;
+                        var els = document.querySelectorAll('input, textarea');
+                        for (var i = 0; i < els.length; i++) {
+                            var el = els[i];
+                            if (el.tagName === 'INPUT') {
+                                var ty = el.type;
+                                if (ty && ty !== 'text' && ty !== 'search'
+                                    && ty !== 'url' && ty !== 'email'
+                                    && ty !== 'tel' && ty !== 'password')
+                                    continue;
+                            }
+                            if (el.offsetParent === null && el.offsetWidth === 0)
+                                continue;
+                            return el;
+                        }
+                        return null;
+                    }
+                    var inp = findTextInput();
+                    // If we have a tracked input and __dtkSelText was set
+                    // by the drag-select handler, prefer it over DOM
+                    // selection checks — WPE may render the selection
+                    // visually but not update selectionStart/End.
+                    if (inp && window.__dtkSelText)
+                        return window.__dtkSelText;
+                    if (inp && typeof inp.selectionStart === 'number'
+                        && inp.selectionStart !== inp.selectionEnd)
+                        return inp.value.substring(
+                            inp.selectionStart, inp.selectionEnd);
+                    // Check window.getSelection (plain text).
+                    var s = window.getSelection();
+                    var t = s ? s.toString() : '';
+                    if (t) return t;
+                    // Fallback: text tracked by selectionchange listener.
+                    if (window.__dtkSelText) return window.__dtkSelText;
+                    return '';
+                })()
+            )JS";
             webkit_web_view_evaluate_javascript(
-                m_webView, "window.getSelection().toString()", -1,
+                m_webView, s_copyScript, -1,
                 nullptr, nullptr, nullptr,
                 [](GObject *obj, GAsyncResult *res, gpointer) {
                     GError *err = nullptr;
                     JSCValue *val = webkit_web_view_evaluate_javascript_finish(
                         WEBKIT_WEB_VIEW(obj), res, &err);
-                    if (err) { g_error_free(err); return; }
                     if (val && jsc_value_is_string(val)) {
                         char *str = jsc_value_to_string(val);
                         if (str) {
@@ -918,6 +1275,7 @@ void DWPEView::keyPressEvent(QKeyEvent *event)
                         }
                     }
                     if (val) g_object_unref(val);
+                    if (err) g_error_free(err);
                 },
                 nullptr);
         }
