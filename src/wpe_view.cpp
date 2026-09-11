@@ -639,6 +639,7 @@ const char *s_dragSelectFallbackScript = R"JS(
             dragging = true;
             dragInput = inp;
             window.__dtkLastInput = inp;
+            window.__dtkPlainSel = false;  // input selection, not plain text
             // Ensure the input has focus so setSelectionRange is visible.
             try { inp.focus(); } catch (err) { }
             // Record caret offset at mousedown as the anchor.
@@ -651,6 +652,18 @@ const char *s_dragSelectFallbackScript = R"JS(
         // Clear any existing selection (dragging replaces the selection).
         var sel = window.getSelection();
         sel.removeAllRanges();
+        // Also clear any tracked input's selection so updateSelText doesn't
+        // pick up the stale input selection over the new page text selection.
+        var oldLi = window.__dtkLastInput;
+        if (oldLi && document.contains && document.contains(oldLi)
+            && typeof oldLi.selectionStart === 'number'
+            && oldLi.selectionStart !== oldLi.selectionEnd) {
+            try {
+                var p = oldLi.selectionStart;
+                oldLi.setSelectionRange(p, p);
+            } catch (err) { }
+        }
+        window.__dtkPlainSel = true;  // plain text selection active
         dragging = true;
         dragInput = null;
         var c = caretAt(e.clientX, e.clientY);
@@ -764,15 +777,9 @@ const char *s_dragSelectFallbackScript = R"JS(
     // even if the selection has been cleared by page JS by the time the async
     // evaluate_javascript callback runs.
     window.__dtkSelText = '';
+    window.__dtkPlainSel = false;
     function updateSelText() {
-        // Check window.getSelection() first — a non-empty DOM selection
-        // means the user selected plain text on the page.  This takes
-        // priority over stale INPUT selections (INPUT/TEXTAREA selections
-        // do not appear in window.getSelection()).
-        var s = window.getSelection();
-        var t = s ? s.toString() : '';
-        if (t) { window.__dtkSelText = t; return; }
-        // Check INPUT/TEXTAREA selections.
+        // Prioritize INPUT/TEXTAREA selections over page selections.
         var a = document.activeElement;
         if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')
             && typeof a.selectionStart === 'number'
@@ -787,6 +794,14 @@ const char *s_dragSelectFallbackScript = R"JS(
             && li.selectionStart !== li.selectionEnd) {
             window.__dtkSelText = li.value.substring(li.selectionStart, li.selectionEnd);
             return;
+        }
+        // Only check window.getSelection() for plain text selections.
+        // This avoids the expensive toString() call on every selectionchange
+        // when the user is interacting with an input.
+        if (window.__dtkPlainSel) {
+            var s = window.getSelection();
+            var t = s ? s.toString() : '';
+            if (t) window.__dtkSelText = t;
         }
     }
     document.addEventListener('selectionchange', updateSelText);
@@ -1253,6 +1268,12 @@ void DWPEView::keyPressEvent(QKeyEvent *event)
                         return null;
                     }
                     var inp = findTextInput();
+                    // If a plain text selection is active, check it first.
+                    if (window.__dtkPlainSel) {
+                        var s = window.getSelection();
+                        var t = s ? s.toString() : '';
+                        if (t) return t;
+                    }
                     // If we have a tracked input and __dtkSelText was set
                     // by the drag-select handler, prefer it over DOM
                     // selection checks — WPE may render the selection
@@ -1440,8 +1461,19 @@ bool DWPEView::event(QEvent *event)
             queryEvent->setValue(Qt::ImEnabled, QVariant(true));
         if (queryEvent->queries() & Qt::ImCursorRectangle) {
             QRect rect(0, 0, 1, 16);
-            if (m_imContext)
+            if (m_imContext) {
                 rect = m_imContext->cursorRect();
+                // WPE reports cursor coordinates in device pixels; Qt expects
+                // logical pixels for ImCursorRectangle.
+                float dpr = static_cast<float>(devicePixelRatioF());
+                if (dpr > 1.0f) {
+                    rect.setRect(
+                        static_cast<int>(rect.x() / dpr),
+                        static_cast<int>(rect.y() / dpr),
+                        static_cast<int>(rect.width() / dpr),
+                        static_cast<int>(rect.height() / dpr));
+                }
+            }
             queryEvent->setValue(Qt::ImCursorRectangle, QVariant(rect));
         }
         if (queryEvent->queries() & Qt::ImHints)
