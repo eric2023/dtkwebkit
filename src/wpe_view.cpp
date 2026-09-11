@@ -23,6 +23,9 @@
 #include <QClipboard>
 #include <QGuiApplication>
 #include <glib.h>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QTimer>
 #include <QStandardPaths>
 // WebKitHitTestResult.h is included transitively via <wpe/webkit.h>.
 #include <QDir>
@@ -804,23 +807,115 @@ const char *s_dragSelectFallbackScript = R"JS(
             if (t) window.__dtkSelText = t;
         }
     }
-    document.addEventListener('selectionchange', updateSelText);
-    // INPUT/TEXTAREA selection changes don't always fire document selectionchange.
-    // Also listen for select, keyup, and mouseup on inputs.
-    document.addEventListener('select', updateSelText, true);
-    document.addEventListener('keyup', function(e) {
-        if (e.target && editableInputOf(e.target))
-            updateSelText();
-    }, true);
 })();
 )JS";
 }  // namespace
+
+// JS to compute the IME cursor rectangle from the focused input element.
+// WPE's notify_cursor_area never fires in this embedding, so we compute it
+// via JS and store the result in m_imContext.
+const char *s_cursorRectScript = R"JS(
+    (function() {
+        var inp = window.__dtkLastInput;
+        if (!inp || (document.contains && !document.contains(inp)))
+            inp = null;
+        if (!inp) {
+            var a = document.activeElement;
+            if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA'))
+                inp = a;
+        }
+        if (!inp) {
+            var els = document.querySelectorAll('input, textarea');
+            for (var i = 0; i < els.length; i++) {
+                var el = els[i];
+                if (el.tagName === 'INPUT') {
+                    var ty = el.type;
+                    if (ty && ty !== 'text' && ty !== 'search'
+                        && ty !== 'url' && ty !== 'email'
+                        && ty !== 'tel' && ty !== 'password')
+                        continue;
+                }
+                if (el.offsetParent === null && el.offsetWidth === 0)
+                    continue;
+                inp = el;
+                break;
+            }
+        }
+        if (!inp || (inp.tagName !== 'INPUT' && inp.tagName !== 'TEXTAREA'))
+            return null;
+        var rect = inp.getBoundingClientRect();
+        var caretX = rect.left;
+        try {
+            var style = window.getComputedStyle(inp);
+            var paddingLeft = parseFloat(style.paddingLeft) || 0;
+            var borderLeft = parseFloat(style.borderLeftWidth) || 0;
+            var textIndent = parseFloat(style.textIndent) || 0;
+            var pos = inp.selectionStart || 0;
+            var textBefore = inp.value.substring(0, pos);
+            var canvas = document.createElement('canvas');
+            var ctx = canvas.getContext('2d');
+            ctx.font = style.fontStyle + ' ' + style.fontWeight + ' '
+                + style.fontSize + ' ' + style.fontFamily;
+            var textWidth = ctx.measureText(textBefore).width;
+            caretX = rect.left + paddingLeft + borderLeft + textIndent + textWidth;
+        } catch (err) { }
+        var lineHeight = 16;
+        try {
+            lineHeight = parseFloat(window.getComputedStyle(inp).lineHeight) || 16;
+        } catch (err) { }
+        return JSON.stringify({
+            x: Math.round(caretX),
+            y: Math.round(rect.top),
+            w: 1,
+            h: Math.round(lineHeight)
+        });
+    })()
+)JS";
 
 void DWPEView::injectDragSelectFallback()
 {
     if (!m_webView)
         return;
     webkit_web_view_evaluate_javascript(m_webView, s_dragSelectFallbackScript, -1, nullptr, nullptr, nullptr, nullptr, nullptr);
+}
+
+void DWPEView::updateIMECursorRect()
+{
+    if (!m_webView || !m_imContext)
+        return;
+    // Defer the JS evaluation to allow WPE's Web process to process the
+    // current key/mouse event and update the DOM selection state before
+    // we read it. WPE's notify_cursor_area never fires in this embedding.
+    QTimer::singleShot(200, this, [this]() {
+        if (!m_webView || !m_imContext)
+            return;
+        webkit_web_view_evaluate_javascript(
+            m_webView, s_cursorRectScript, -1,
+            nullptr, nullptr, nullptr,
+            [](GObject *obj, GAsyncResult *res, gpointer userData) {
+                auto *view = static_cast<DWPEView *>(userData);
+                if (!view || !view->m_imContext)
+                    return;
+                GError *err = nullptr;
+                JSCValue *val = webkit_web_view_evaluate_javascript_finish(
+                    WEBKIT_WEB_VIEW(obj), res, &err);
+                if (val && jsc_value_is_string(val)) {
+                    char *str = jsc_value_to_string(val);
+                    if (str) {
+                        auto doc = QJsonDocument::fromJson(QByteArray(str));
+                        g_free(str);
+                        auto o = doc.object();
+                        if (o.contains("x") && o.contains("y"))
+                            view->m_imContext->notifyCursorArea(
+                                o["x"].toInt(), o["y"].toInt(),
+                                o["w"].toInt(1), o["h"].toInt(16));
+                    }
+                }
+                if (val) g_object_unref(val);
+                if (err) g_error_free(err);
+            },
+            this);
+    });
 }
 
 void DWPEView::paintGL()
@@ -1363,6 +1458,10 @@ void DWPEView::keyPressEvent(QKeyEvent *event)
     }
 
 
+    // Update IME cursor rectangle via JS. WPE's notify_cursor_area never
+    // fires in this embedding, so we compute it from the focused input
+    // element and store it for the next ImCursorRectangle query.
+    updateIMECursorRect();
     m_eventTranslator->translateKeyEvent(event);
     QOpenGLWindow::keyPressEvent(event);
 }
@@ -1386,6 +1485,8 @@ void DWPEView::mousePressEvent(QMouseEvent *event)
         return;
     }
     m_eventTranslator->translateMouseEvent(event);
+    // Update IME cursor rectangle after clicking (focuses input fields).
+    updateIMECursorRect();
     QOpenGLWindow::mousePressEvent(event);
 }
 
@@ -1429,6 +1530,9 @@ bool DWPEView::event(QEvent *event)
     // Handle input method events via event() since QWindow doesn't provide
     // inputMethodEvent/inputMethodQuery virtual functions.
     if (event->type() == QEvent::InputMethod) {
+        // Update cursor rectangle before processing IME events so the
+        // candidate window is positioned at the correct location.
+        updateIMECursorRect();
         auto *imeEvent = static_cast<QInputMethodEvent *>(event);
         if (m_imContext) {
             if (!imeEvent->commitString().isEmpty()) {
@@ -1463,8 +1567,6 @@ bool DWPEView::event(QEvent *event)
             QRect rect(0, 0, 1, 16);
             if (m_imContext) {
                 rect = m_imContext->cursorRect();
-                // WPE reports cursor coordinates in device pixels; Qt expects
-                // logical pixels for ImCursorRectangle.
                 float dpr = static_cast<float>(devicePixelRatioF());
                 if (dpr > 1.0f) {
                     rect.setRect(

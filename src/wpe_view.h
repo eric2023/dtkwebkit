@@ -144,6 +144,10 @@ private:
     // Inject the drag-to-select JS fallback into the page's main world.
     // Called from onLoadChanged (LOAD_COMMITTED) when m_dragSelectEnabled.
     void injectDragSelectFallback();
+    // Update the IME cursor rectangle by evaluating JS to find the
+    // focused input element's caret position. Called from keyPressEvent
+    // and mousePressEvent to keep the candidate window positioned correctly.
+    void updateIMECursorRect();
 
     // --- DevTools / Inspector ---
     bool isDevToolsEnabled() const { return m_devToolsEnabled; }
