@@ -26,6 +26,8 @@
 #include <QStandardPaths>
 // WebKitHitTestResult.h is included transitively via <wpe/webkit.h>.
 #include <QDir>
+#include <QMenu>
+#include <QAction>
 
 DTKWPE_BEGIN_NAMESPACE
 
@@ -1281,6 +1283,53 @@ void DWPEView::keyPressEvent(QKeyEvent *event)
         }
         return;  // Don't forward to WPE
     }
+    // Intercept Ctrl+V (Paste).  WPE's paste mechanism goes through the
+    // pasteboard IPC which is not wired up, so we read Qt's clipboard
+    // (where Ctrl+C put the text) and insert it into the focused element
+    // via document.execCommand('insertText') or value manipulation.
+    if (event->key() == Qt::Key_V && (event->modifiers() & Qt::ControlModifier)) {
+        if (m_webView) {
+            QString clipText = QGuiApplication::clipboard()->text();
+            // Escape for JS string literal.
+            QString escaped = clipText;
+            escaped.replace(QLatin1String("\\"), QLatin1String("\\\\"));
+            escaped.replace(QLatin1String("'"),  QLatin1String("\\'"));
+            escaped.replace(QLatin1String("\n"), QLatin1String("\\n"));
+            escaped.replace(QLatin1String("\r"), QLatin1String("\\r"));
+            QByteArray js = QString(
+                "(function(){"
+                "  var t='%1';"
+                "  var a=document.activeElement;"
+                "  if(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA')"
+                "    &&typeof a.selectionStart==='number'){"
+                "    var s=a.selectionStart,e=a.selectionEnd;"
+                "    a.value=a.value.substring(0,s)+t+a.value.substring(e);"
+                "    var p=s+t.length;"
+                "    a.setSelectionRange(p,p);"
+                "    return;"
+                "  }"
+                "  var li=window.__dtkLastInput;"
+                "  if(li&&document.contains&&document.contains(li)"
+                "    &&(li.tagName==='INPUT'||li.tagName==='TEXTAREA')"
+                "    &&typeof li.selectionStart==='number'){"
+                "    var s=li.selectionStart,e=li.selectionEnd;"
+                "    li.value=li.value.substring(0,s)+t+li.value.substring(e);"
+                "    var p=s+t.length;"
+                "    li.setSelectionRange(p,p);"
+                "    return;"
+                "  }"
+                "  if(document.queryCommandSupported&&document.execCommand){"
+                "    document.execCommand('insertText',false,t);"
+                "  }"
+                "})()"
+            ).arg(escaped).toUtf8();
+            webkit_web_view_evaluate_javascript(
+                m_webView, js.constData(), -1,
+                nullptr, nullptr, nullptr, nullptr, nullptr);
+        }
+        return;  // Don't forward to WPE
+    }
+
 
     m_eventTranslator->translateKeyEvent(event);
     QOpenGLWindow::keyPressEvent(event);
@@ -1294,24 +1343,13 @@ void DWPEView::keyReleaseEvent(QKeyEvent *event)
 
 void DWPEView::mousePressEvent(QMouseEvent *event)
 {
-    // Swallow right-button entirely.  The translator already drops it, but
-    // we must also avoid calling the base class, which lets Qt deliver a
-    // contextMenuEvent to the container.
-    //
-    // Additionally, clear any active text selection via JS *before*
-    // returning.  When a selection exists, a right-click causes the X11
-    // server to query the selection owner (the WPE WebProcess via
-    // WPEBackend-FDO).  The pasteboard is not wired up, so the query
-    // triggers a wakeup storm that freezes the UI.  Clearing the
-    // selection first prevents the query.
+    // Right-button: show a Qt context menu with Copy/Paste/Select All.
+    // WPE's native context menu triggers clipboard IPC that deadlocks
+    // (pasteboard not wired up), so we must not forward right-click to WPE.
+    // We also must NOT clear the selection — the user may want to copy it.
     if (event->button() == Qt::RightButton) {
-        if (m_webView) {
-            webkit_web_view_evaluate_javascript(
-                m_webView,
-                "window.getSelection ? window.getSelection().removeAllRanges() : 0",
-                -1, nullptr, nullptr, nullptr, nullptr, nullptr);
-        }
         event->accept();
+        showContextMenu(event->pos());
         return;
     }
     m_eventTranslator->translateMouseEvent(event);
@@ -1326,6 +1364,48 @@ void DWPEView::mouseReleaseEvent(QMouseEvent *event)
     }
     m_eventTranslator->translateMouseEvent(event);
     QOpenGLWindow::mouseReleaseEvent(event);
+}
+
+void DWPEView::showContextMenu(const QPoint &pos)
+{
+    // Build a minimal context menu with Copy / Paste / Select All.
+    // WPE's native context menu triggers clipboard IPC that deadlocks,
+    // so we provide our own Qt menu that reuses the Ctrl+C/V/A JS logic
+    // by synthesising the corresponding key sequences.
+    QMenu menu;
+
+    // Query current selection / clipboard state to enable/disable actions.
+    bool hasSelection = false;
+    bool hasClipboard = !QGuiApplication::clipboard()->text().isEmpty();
+    if (m_webView) {
+        // Check via JS whether there is a selection or a focused input.
+        // We use a synchronous check through __dtkSelText and activeElement.
+        // Since evaluate_javascript is async, we optimistically enable Copy
+        // and Select All; the JS handlers handle empty gracefully.
+        hasSelection = true;  // optimistic — menu shown after user selects
+    }
+
+    auto *copyAction = menu.addAction(tr("Copy"));
+    copyAction->setEnabled(hasSelection);
+    auto *pasteAction = menu.addAction(tr("Paste"));
+    pasteAction->setEnabled(hasClipboard);
+    menu.addSeparator();
+    auto *selectAllAction = menu.addAction(tr("Select All"));
+
+    QAction *chosen = menu.exec(mapToGlobal(pos));
+    if (!chosen)
+        return;
+
+    if (chosen == copyAction) {
+        QKeyEvent copyPress(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+        keyPressEvent(&copyPress);
+    } else if (chosen == pasteAction) {
+        QKeyEvent pastePress(QEvent::KeyPress, Qt::Key_V, Qt::ControlModifier);
+        keyPressEvent(&pastePress);
+    } else if (chosen == selectAllAction) {
+        QKeyEvent selectPress(QEvent::KeyPress, Qt::Key_A, Qt::ControlModifier);
+        keyPressEvent(&selectPress);
+    }
 }
 
 void DWPEView::mouseMoveEvent(QMouseEvent *event)
