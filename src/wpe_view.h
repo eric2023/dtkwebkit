@@ -167,7 +167,6 @@ protected:
 
 private:
     void initShader();
-    void showContextMenu(const QPoint &pos);
 
 protected:
     // Event forwarding

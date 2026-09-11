@@ -26,8 +26,6 @@
 #include <QStandardPaths>
 // WebKitHitTestResult.h is included transitively via <wpe/webkit.h>.
 #include <QDir>
-#include <QMenu>
-#include <QAction>
 
 DTKWPE_BEGIN_NAMESPACE
 
@@ -273,12 +271,14 @@ void DWPEView::initializeWPE(EGLDisplay eglDisplay)
     g_signal_connect(m_webView, "create", G_CALLBACK(onCreate), this);
     g_signal_connect(m_webView, "ready-to-show", G_CALLBACK(onReadyToShow), this);
     g_signal_connect(m_webView, "close", G_CALLBACK(onClose), this);
-    // Suppress the default context menu: WPE's built-in menu is a native
-    // popup that captures the pointer, breaking all subsequent mouse events
-    // (including drag-select).  The host application can still implement its
-    // own menu via the context-menu signal if needed.
+    // Suppress the WPE context menu: WPE's WebContextMenuProxyWPE::show() is
+    // empty (no native popup support under X11), but WPE still enters a
+    // "context menu" state that swallows subsequent mouse events, breaking
+    // drag-select after a right-click.  Returning TRUE prevents that state.
+    // The right-click itself is still forwarded to WPE (for hit testing,
+    // JS contextmenu events, etc.) — only the menu display is suppressed.
     g_signal_connect(m_webView, "context-menu", G_CALLBACK(+[](WebKitWebView *, WebKitContextMenu *, gpointer, WebKitHitTestResult *, gpointer) -> gboolean {
-        return TRUE;  // prevent default
+        return TRUE;  // suppress menu
     }), nullptr);
     // Mark the view as visible, in-window, and focused so WPE starts
     // producing frames and accepting input. focusInEvent may not fire
@@ -614,10 +614,21 @@ const char *s_dragSelectFallbackScript = R"JS(
         // --- INPUT / TEXTAREA / contentEditable ---
         // Check __dtkLastInput first — on pages like Baidu, elementFromPoint
         // and elementsFromPoint can't find the input (overlays, shadow DOM).
+        // But only use it if the mousedown is actually inside the input's
+        // bounding rect — otherwise dragging page text would erroneously
+        // target the last-focused input (e.g. triggering its dropdown).
         var li = window.__dtkLastInput;
         if (li && document.contains && !document.contains(li))
             li = null;  // stale reference after navigation
-        var inp = li;
+        var inp = null;
+        if (li) {
+            try {
+                var r = li.getBoundingClientRect();
+                if (e.clientX >= r.left && e.clientX <= r.right
+                    && e.clientY >= r.top && e.clientY <= r.bottom)
+                    inp = li;
+            } catch (err) { }
+        }
         if (!inp) {
             var el = elFromPoint(e.clientX, e.clientY);
             if (!el) return;
@@ -754,7 +765,14 @@ const char *s_dragSelectFallbackScript = R"JS(
     // evaluate_javascript callback runs.
     window.__dtkSelText = '';
     function updateSelText() {
-        // Prioritize INPUT/TEXTAREA selections over page selections.
+        // Check window.getSelection() first — a non-empty DOM selection
+        // means the user selected plain text on the page.  This takes
+        // priority over stale INPUT selections (INPUT/TEXTAREA selections
+        // do not appear in window.getSelection()).
+        var s = window.getSelection();
+        var t = s ? s.toString() : '';
+        if (t) { window.__dtkSelText = t; return; }
+        // Check INPUT/TEXTAREA selections.
         var a = document.activeElement;
         if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')
             && typeof a.selectionStart === 'number'
@@ -770,13 +788,6 @@ const char *s_dragSelectFallbackScript = R"JS(
             window.__dtkSelText = li.value.substring(li.selectionStart, li.selectionEnd);
             return;
         }
-        // Fall back to window.getSelection (plain text).
-        // Skip this fallback when __dtkLastInput exists (even if stale) —
-        // the drag-select handler already set __dtkSelText with the input text.
-        if (window.__dtkLastInput) return;
-        var s = window.getSelection();
-        var t = s ? s.toString() : '';
-        if (t) window.__dtkSelText = t;
     }
     document.addEventListener('selectionchange', updateSelText);
     // INPUT/TEXTAREA selection changes don't always fire document selectionchange.
@@ -1343,13 +1354,14 @@ void DWPEView::keyReleaseEvent(QKeyEvent *event)
 
 void DWPEView::mousePressEvent(QMouseEvent *event)
 {
-    // Right-button: show a Qt context menu with Copy/Paste/Select All.
-    // WPE's native context menu triggers clipboard IPC that deadlocks
-    // (pasteboard not wired up), so we must not forward right-click to WPE.
-    // We also must NOT clear the selection — the user may want to copy it.
+    // Swallow right-click: WPE's native context menu is not functional
+    // (WebContextMenuProxyWPE::show() is empty under X11), and forwarding
+    // the right-click to WPE puts it in a "context menu" state that
+    // breaks subsequent mouse events (drag-select stops working).
+    // We do NOT clear the text selection — the user may want to copy it
+    // with Ctrl+C after right-clicking.
     if (event->button() == Qt::RightButton) {
         event->accept();
-        showContextMenu(event->pos());
         return;
     }
     m_eventTranslator->translateMouseEvent(event);
@@ -1366,47 +1378,6 @@ void DWPEView::mouseReleaseEvent(QMouseEvent *event)
     QOpenGLWindow::mouseReleaseEvent(event);
 }
 
-void DWPEView::showContextMenu(const QPoint &pos)
-{
-    // Build a minimal context menu with Copy / Paste / Select All.
-    // WPE's native context menu triggers clipboard IPC that deadlocks,
-    // so we provide our own Qt menu that reuses the Ctrl+C/V/A JS logic
-    // by synthesising the corresponding key sequences.
-    QMenu menu;
-
-    // Query current selection / clipboard state to enable/disable actions.
-    bool hasSelection = false;
-    bool hasClipboard = !QGuiApplication::clipboard()->text().isEmpty();
-    if (m_webView) {
-        // Check via JS whether there is a selection or a focused input.
-        // We use a synchronous check through __dtkSelText and activeElement.
-        // Since evaluate_javascript is async, we optimistically enable Copy
-        // and Select All; the JS handlers handle empty gracefully.
-        hasSelection = true;  // optimistic — menu shown after user selects
-    }
-
-    auto *copyAction = menu.addAction(tr("Copy"));
-    copyAction->setEnabled(hasSelection);
-    auto *pasteAction = menu.addAction(tr("Paste"));
-    pasteAction->setEnabled(hasClipboard);
-    menu.addSeparator();
-    auto *selectAllAction = menu.addAction(tr("Select All"));
-
-    QAction *chosen = menu.exec(mapToGlobal(pos));
-    if (!chosen)
-        return;
-
-    if (chosen == copyAction) {
-        QKeyEvent copyPress(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
-        keyPressEvent(&copyPress);
-    } else if (chosen == pasteAction) {
-        QKeyEvent pastePress(QEvent::KeyPress, Qt::Key_V, Qt::ControlModifier);
-        keyPressEvent(&pastePress);
-    } else if (chosen == selectAllAction) {
-        QKeyEvent selectPress(QEvent::KeyPress, Qt::Key_A, Qt::ControlModifier);
-        keyPressEvent(&selectPress);
-    }
-}
 
 void DWPEView::mouseMoveEvent(QMouseEvent *event)
 {
@@ -1475,14 +1446,6 @@ bool DWPEView::event(QEvent *event)
         }
         if (queryEvent->queries() & Qt::ImHints)
             queryEvent->setValue(Qt::ImHints, QVariant(Qt::ImhNone));
-        return true;
-    }
-    if (event->type() == QEvent::ContextMenu) {
-        // Swallow context-menu events: Qt synthesizes these from
-        // right-button presses, and the QWindowContainer may forward
-        // them to the host widget.  Any context menu reaching the WPE
-        // layer triggers clipboard IPC that deadlocks.
-        event->accept();
         return true;
     }
     return QOpenGLWindow::event(event);
