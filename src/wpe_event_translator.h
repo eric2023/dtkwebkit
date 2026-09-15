@@ -68,6 +68,12 @@ private:
     // Track modifier state for xkb key code resolution
     uint32_t m_modifiers{0};
 
+    // Whether CapsLock is currently active (toggled on). Tracked from
+    // Qt::Key_CapsLock key events so the xkb state can be updated with
+    // the correct locked-modifier mask, which is needed for
+    // xkb_state_key_get_one_sym() to return uppercase keysyms.
+    bool m_capsLockActive{false};
+
     // xkb keymap handle (for proper key->text conversion)
     struct wpe_input_xkb_context *m_xkbContext{nullptr};
 

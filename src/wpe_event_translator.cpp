@@ -17,6 +17,7 @@
 // wpe/input-xkb.h is included transitively via <wpe/wpe.h> in the header.
 // We only need xkbcommon for xkb_keymap_new_from_names.
 #include <xkbcommon/xkbcommon.h>
+#include <xkbcommon/xkbcommon-names.h>
 
 DTKWPE_BEGIN_NAMESPACE
 
@@ -156,6 +157,15 @@ void DWPEEventTranslator::translateKeyEvent(QKeyEvent *event)
     if (!m_backend)
         return;
 
+    // Track CapsLock toggle state. Qt sends a KeyPress for CapsLock when
+    // it is toggled on, and a KeyRelease when toggled off. We must track
+    // this ourselves because the xkb state needs a locked-modifier mask
+    // for xkb_state_key_get_one_sym() to return uppercase keysyms.
+    if (event->key() == Qt::Key_CapsLock) {
+        if (event->type() == QEvent::KeyPress)
+            m_capsLockActive = !m_capsLockActive;
+    }
+
     // Evdev scancode from the Qt key mapping table.
     uint32_t evdevCode = qtKeyToLinuxKeyCode(event->key());
     // xkb keycodes are offset by +8 from Linux evdev scancodes
@@ -167,11 +177,37 @@ void DWPEEventTranslator::translateKeyEvent(QKeyEvent *event)
     m_keyboardEvent.hardware_key_code = xkbCode;
     m_keyboardEvent.pressed = (event->type() == QEvent::KeyPress);
 
-    // Resolve the WPE key_code (keysym) from the xkb keycode.
-    if (m_xkbContext)
+    // Update the xkb state's modifier mask so that
+    // xkb_state_key_get_one_sym() (called inside get_key_code) returns
+    // the correct shift level (uppercase vs lowercase). Without this,
+    // the xkb state always thinks no modifiers are active and every
+    // letter key resolves to its level-0 (lowercase) keysym, making it
+    // impossible to type uppercase letters via Shift or CapsLock.
+    if (m_xkbContext) {
+        struct xkb_state *xkbState = wpe_input_xkb_context_get_state(m_xkbContext);
+        if (xkbState) {
+            struct xkb_keymap *keymap = xkb_state_get_keymap(xkbState);
+            xkb_mod_mask_t depressed = 0;
+            xkb_mod_mask_t locked = 0;
+
+            if (event->modifiers() & Qt::ShiftModifier)
+                depressed |= (1 << xkb_keymap_mod_get_index(keymap, XKB_MOD_NAME_SHIFT));
+            if (event->modifiers() & Qt::ControlModifier)
+                depressed |= (1 << xkb_keymap_mod_get_index(keymap, XKB_MOD_NAME_CTRL));
+            if (event->modifiers() & Qt::AltModifier)
+                depressed |= (1 << xkb_keymap_mod_get_index(keymap, XKB_MOD_NAME_ALT));
+            if (event->modifiers() & Qt::MetaModifier)
+                depressed |= (1 << xkb_keymap_mod_get_index(keymap, "Meta"));
+            if (m_capsLockActive)
+                locked |= (1 << xkb_keymap_mod_get_index(keymap, XKB_MOD_NAME_CAPS));
+
+            xkb_state_update_mask(xkbState, depressed, 0, locked, 0, 0, 0);
+        }
+
         m_keyboardEvent.key_code = wpe_input_xkb_context_get_key_code(m_xkbContext, xkbCode, m_keyboardEvent.pressed);
-    else
+    } else {
         m_keyboardEvent.key_code = xkbCode;
+    }
 
     // Modifiers
     uint32_t mods = 0;
